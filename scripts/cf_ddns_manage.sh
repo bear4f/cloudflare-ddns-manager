@@ -4,9 +4,12 @@ set -Eeuo pipefail
 BASE_DIR="/usr/local/ddns"
 ENV_FILE="$BASE_DIR/cf_ddns.env"
 WORKER="$BASE_DIR/cf_ddns.sh"
+CHANGER="$BASE_DIR/cf_change_ip.sh"
+BOT_WORKER="$BASE_DIR/cf_ddns_bot.sh"
 LOG_FILE="/var/log/cf_ddns.log"
 SERVICE_FILE="/etc/systemd/system/cf-ddns.service"
 TIMER_FILE="/etc/systemd/system/cf-ddns.timer"
+BOT_SERVICE_FILE="/etc/systemd/system/cf-ddns-bot.service"
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -29,6 +32,10 @@ load_env() {
   TG_ENABLED="false"
   TG_BOT_TOKEN=""
   TG_CHAT_ID=""
+  IP_CHANGE_ENABLED="false"
+  IP_CHANGE_API_URL=""
+  IP_CHANGE_API_FORMAT_JSON="true"
+  IP_CHANGE_WAIT_SECONDS="8"
 
   if [[ -f "$ENV_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -160,8 +167,22 @@ COMMENT_EOF
     echo
 
     cat <<'COMMENT_EOF'
+# 换 IP API 配置
+# IP_CHANGE_API_URL 通常是 Boil 面板生成的 https://ippanel.boil.network/api/... 专属链接。
+# IP_CHANGE_API_FORMAT_JSON=true 时会自动给链接追加 format=json。
+COMMENT_EOF
+
+    printf 'IP_CHANGE_ENABLED=%q\n' "$IP_CHANGE_ENABLED"
+    printf 'IP_CHANGE_API_URL=%q\n' "$IP_CHANGE_API_URL"
+    printf 'IP_CHANGE_API_FORMAT_JSON=%q\n' "$IP_CHANGE_API_FORMAT_JSON"
+    printf 'IP_CHANGE_WAIT_SECONDS=%q\n' "$IP_CHANGE_WAIT_SECONDS"
+
+    echo
+
+    cat <<'COMMENT_EOF'
 # Telegram 通知配置
 # TG_ENABLED=true 时，仅在 DNS 记录创建或 IP 变化更新成功后推送。
+# 安装 Telegram Bot 命令服务后，可通过 /changeip 触发换 IP API。
 COMMENT_EOF
 
     printf 'TG_ENABLED=%q\n' "$TG_ENABLED"
@@ -223,6 +244,23 @@ configure_env() {
   prompt_sensitive_text_keep RECORD_NAME "请输入需要 DDNS 更新的完整 A 记录域名" "ddns.example.com"
   prompt_num_keep TTL "请输入 TTL，常用 120；若使用 Cloudflare 自动 TTL 可填 1" "${TTL:-120}"
   prompt_bool_keep PROXY "是否开启 Cloudflare 小云朵代理 proxied？DDNS 通常建议 n" "${PROXY:-false}"
+
+  echo
+  echo "=== Boil 换 IP API ==="
+  echo "如果已获得专属 API，可在这里配置；脚本会把链接作为密钥保存，不会回显。"
+  echo
+
+  prompt_bool_keep IP_CHANGE_ENABLED "是否启用换 IP API？" "${IP_CHANGE_ENABLED:-false}"
+
+  if [[ "$IP_CHANGE_ENABLED" == "true" ]]; then
+    prompt_secret_keep IP_CHANGE_API_URL "请输入换 IP API 专属链接"
+    prompt_bool_keep IP_CHANGE_API_FORMAT_JSON "是否自动追加 format=json？通常建议 y" "${IP_CHANGE_API_FORMAT_JSON:-true}"
+    prompt_num_keep IP_CHANGE_WAIT_SECONDS "换 IP 后等待多少秒再更新 Cloudflare DDNS" "${IP_CHANGE_WAIT_SECONDS:-8}"
+  else
+    IP_CHANGE_API_URL=""
+    IP_CHANGE_API_FORMAT_JSON="true"
+    IP_CHANGE_WAIT_SECONDS="8"
+  fi
 
   echo
   echo "=== Telegram 变更通知 ==="
@@ -304,6 +342,65 @@ run_once() {
   bash "$WORKER"
 }
 
+change_ip_once() {
+  ensure_deps || return 1
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo "尚未配置，请先选择 1 初始化/修改配置。"
+    return 1
+  fi
+
+  load_env
+
+  if [[ "${IP_CHANGE_ENABLED:-false}" != "true" || -z "${IP_CHANGE_API_URL:-}" ]]; then
+    echo "换 IP API 未启用或配置不完整，请先选择 1 修改配置。"
+    return 1
+  fi
+
+  bash "$CHANGER"
+
+  local wait_seconds="${IP_CHANGE_WAIT_SECONDS:-8}"
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] || wait_seconds="8"
+
+  echo "等待 ${wait_seconds} 秒后运行一次 DDNS 检测..."
+  sleep "$wait_seconds"
+  bash "$WORKER"
+}
+
+install_bot_service() {
+  ensure_deps || return 1
+  load_env
+
+  if [[ "${TG_ENABLED:-false}" != "true" || -z "${TG_BOT_TOKEN:-}" || -z "${TG_CHAT_ID:-}" ]]; then
+    echo "Telegram 未启用或配置不完整，请先选择 1 修改配置。"
+    return 1
+  fi
+
+  cat > "$BOT_SERVICE_FILE" <<EOF
+[Unit]
+Description=Cloudflare DDNS Telegram Command Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$BOT_WORKER
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now cf-ddns-bot.service
+  systemctl restart cf-ddns-bot.service
+
+  echo "已安装/更新 Telegram Bot 命令服务。"
+  echo "可用命令：/changeip /ddns /status /help"
+  systemctl status cf-ddns-bot.service --no-pager || true
+}
+
 test_telegram() {
   ensure_deps || return 1
   load_env
@@ -335,6 +432,10 @@ show_status() {
   systemctl status cf-ddns.service --no-pager || true
 
   echo
+  echo "=== telegram bot service ==="
+  systemctl status cf-ddns-bot.service --no-pager || true
+
+  echo
   echo "注意：DDNS 日志可能包含真实域名、旧 IP、新 IP。"
   read -r -p "是否显示最近 80 行日志？[y/N]: " ans || true
   ans="${ans:-N}"
@@ -361,6 +462,12 @@ disable_timer() {
   echo "已停用 cf-ddns.timer；配置和脚本仍保留。"
 }
 
+disable_bot_service() {
+  systemctl disable --now cf-ddns-bot.service 2>/dev/null || true
+  systemctl daemon-reload
+  echo "已停用 cf-ddns-bot.service；配置和脚本仍保留。"
+}
+
 print_menu() {
   clear 2>/dev/null || true
   echo "Cloudflare DDNS 交互管理"
@@ -373,6 +480,9 @@ print_menu() {
   echo "4) 查看状态与日志"
   echo "5) 测试 Telegram 推送"
   echo "6) 停用 systemd 定时器"
+  echo "7) 立即调用换 IP API，并更新 DDNS"
+  echo "8) 安装/更新 Telegram Bot 命令服务"
+  echo "9) 停用 Telegram Bot 命令服务"
   echo "0) 退出"
   echo
 }
@@ -393,6 +503,9 @@ main() {
       4) show_status; pause ;;
       5) test_telegram; pause ;;
       6) disable_timer; pause ;;
+      7) change_ip_once; pause ;;
+      8) install_bot_service; pause ;;
+      9) disable_bot_service; pause ;;
       0) exit 0 ;;
       *) echo "无效选择。"; sleep 1 ;;
     esac
