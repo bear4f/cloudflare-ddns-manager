@@ -16,7 +16,10 @@ install -m 700 "$SCRIPT_DIR/scripts/cf_ddns.sh" "$BASE_DIR/cf_ddns.sh"
 install -m 700 "$SCRIPT_DIR/scripts/cf_change_ip.sh" "$BASE_DIR/cf_change_ip.sh"
 install -m 700 "$SCRIPT_DIR/scripts/cf_ddns_bot.sh" "$BASE_DIR/cf_ddns_bot.sh"
 install -m 700 "$SCRIPT_DIR/scripts/cf_ddns_manage.sh" "$BASE_DIR/cf_ddns_manage.sh"
-if [[ -f "$SCRIPT_DIR/assets/panel_illustration.png.b64" ]]; then
+if [[ -f "$SCRIPT_DIR/assets/panel_illustration.jpg.b64" ]]; then
+  base64 -d "$SCRIPT_DIR/assets/panel_illustration.jpg.b64" > "$BASE_DIR/panel_illustration.jpg"
+  chmod 600 "$BASE_DIR/panel_illustration.jpg"
+elif [[ -f "$SCRIPT_DIR/assets/panel_illustration.png.b64" ]]; then
   base64 -d "$SCRIPT_DIR/assets/panel_illustration.png.b64" > "$BASE_DIR/panel_illustration.png"
   chmod 600 "$BASE_DIR/panel_illustration.png"
 fi
