@@ -11,7 +11,7 @@
 - 支持 systemd timer 定时运行
 - 支持 Telegram 在记录创建或 IP 变化更新成功后推送通知
 - 支持配置 Boil IP 面板专属换 IP API
-- 支持 Telegram Bot 命令 `/changeip` 一键换 IP 并自动更新 DDNS
+- 支持 Telegram Bot 交互式按钮面板，一键换 IP、运行 DDNS、查看状态
 - 配置文件使用 600 权限保存，避免密钥被普通用户读取
 
 ## 环境要求
@@ -219,9 +219,21 @@ Telegram 只会在 DNS 记录创建或 IP 变化更新成功后推送。
 
 - `/etc/systemd/system/cf-ddns-bot.service`
 
+安装完成或重启 Bot 服务后，Telegram 输入框左侧的“菜单”会显示快捷命令。也可以直接发送 `/start` 或 `/panel` 打开按钮控制面板。
+
+面板按钮：
+
+```text
+🔁 换 IP      调用 Boil 换 IP API，然后自动更新 Cloudflare DDNS
+📡 更新 DDNS  只立即运行一次 DDNS 检测
+📊 状态       查看当前公网 IP、记录名、timer 和 Bot 服务状态
+ℹ️ 帮助       查看可用命令
+```
+
 可用命令：
 
 ```text
+/panel - 打开按钮控制面板
 /changeip - 调用换 IP API，然后自动更新 Cloudflare DDNS
 /ddns - 只立即运行一次 DDNS 检测
 /status - 查看当前公网 IP 和服务状态
