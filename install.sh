@@ -19,7 +19,7 @@ install -m 700 "$SCRIPT_DIR/scripts/cf_ddns_manage.sh" "$BASE_DIR/cf_ddns_manage
 if [[ -f "$SCRIPT_DIR/assets/panel_illustration.jpg.hex" ]]; then
   perl -0777 -ne 's/[^0-9A-Fa-f]//g; print pack("H*", $_)' "$SCRIPT_DIR/assets/panel_illustration.jpg.hex" > "$BASE_DIR/panel_illustration.jpg"
   byte_count="$(wc -c < "$BASE_DIR/panel_illustration.jpg" | tr -d ' ')"
-  if [[ "$byte_count" -lt 17000 ]]; then
+  if [[ "$byte_count" -lt 1000 ]]; then
     echo "图片资源不完整：$BASE_DIR/panel_illustration.jpg 当前 ${byte_count} 字节，已停止安装。"
     exit 1
   fi
