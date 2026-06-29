@@ -233,6 +233,7 @@ Telegram 只会在 DNS 记录创建或 IP 变化更新成功后推送。
 可用命令：
 
 ```text
+/start - 打开按钮控制面板
 /panel - 打开按钮控制面板
 /changeip - 调用换 IP API，然后自动更新 Cloudflare DDNS
 /ddns - 只立即运行一次 DDNS 检测
