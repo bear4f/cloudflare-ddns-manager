@@ -1,0 +1,4 @@
+.DS_Store
+*.log
+cf_ddns.env
+work/
