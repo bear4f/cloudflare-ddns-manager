@@ -95,10 +95,10 @@ resolve_panel_image_file() {
     return 0
   fi
 
-  if is_valid_panel_image "$BASE_DIR/panel_illustration.jpg"; then
-    printf '%s\n' "$BASE_DIR/panel_illustration.jpg"
-  elif is_valid_panel_image "$BASE_DIR/panel_illustration.png"; then
+  if is_valid_panel_image "$BASE_DIR/panel_illustration.png"; then
     printf '%s\n' "$BASE_DIR/panel_illustration.png"
+  elif is_valid_panel_image "$BASE_DIR/panel_illustration.jpg"; then
+    printf '%s\n' "$BASE_DIR/panel_illustration.jpg"
   fi
 }
 
