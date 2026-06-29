@@ -44,8 +44,12 @@ is_valid_panel_image() {
       [[ "$magic" == "ffd8" ]]
       ;;
     *.png)
-      magic="$(LC_ALL=C od -An -N4 -tx1 "$image_file" 2>/dev/null | tr -d ' \n')"
-      [[ "$magic" == "89504e47" ]]
+      [[ "$byte_count" -ge "$MIN_PANEL_IMAGE_BYTES" ]] || return 1
+      magic="$(LC_ALL=C od -An -N8 -tx1 "$image_file" 2>/dev/null | tr -d ' \n')"
+      [[ "$magic" == "89504e470d0a1a0a" ]] || return 1
+      # 拒绝被截断的 PNG：必须以完整的 IEND 块结尾，否则 Telegram 会报 IMAGE_PROCESS_FAILED。
+      trailer="$(LC_ALL=C tail -c 12 "$image_file" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+      [[ "$trailer" == "0000000049454e44ae426082" ]]
       ;;
     *)
       return 1
