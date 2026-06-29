@@ -60,7 +60,7 @@ install_remote_asset() {
 
   echo "拉取：${remote_path}"
   download_file "${RAW_BASE}/${remote_path}" "$tmp_file"
-  base64 -d "$tmp_file" > "$target_path"
+  tr -cd 'A-Za-z0-9+/=' < "$tmp_file" | base64 -d > "$target_path"
   chmod 600 "$target_path"
 }
 
