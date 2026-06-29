@@ -413,7 +413,7 @@ Description=Run Cloudflare DDNS every ${minutes} minutes
 [Timer]
 OnBootSec=30s
 OnUnitActiveSec=${minutes}min
-AccuracySec=30s
+AccuracySec=1s
 Persistent=true
 Unit=cf-ddns.service
 
