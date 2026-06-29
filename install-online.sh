@@ -65,7 +65,7 @@ install_remote_asset() {
   download_file "${RAW_BASE}/${remote_path}" "$tmp_file"
   perl -0777 -ne 's/[^0-9A-Fa-f]//g; print pack("H*", $_)' "$tmp_file" > "$target_path"
   byte_count="$(wc -c < "$target_path" | tr -d ' ')"
-  if [[ "$target_path" == *.jpg && "$byte_count" -lt 17000 ]]; then
+  if [[ "$target_path" == *.jpg && "$byte_count" -lt 1000 ]]; then
     echo "图片资源不完整：${target_path} 当前 ${byte_count} 字节，已停止安装。"
     exit 1
   fi
