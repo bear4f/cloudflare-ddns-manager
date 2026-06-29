@@ -5,6 +5,7 @@ BASE_DIR="/usr/local/ddns"
 ENV_FILE="$BASE_DIR/cf_ddns.env"
 LOG_FILE="/var/log/cf_ddns.log"
 LOCK_FILE="/run/cf-ddns.lock"
+BOT_WORKER="$BASE_DIR/cf_ddns_bot.sh"
 CF_API_BASE="https://api.cloudflare.com/client/v4"
 
 log() {
@@ -40,6 +41,23 @@ send_telegram() {
     >/dev/null; then
     log "Telegram 推送失败。"
   fi
+}
+
+send_telegram_panel() {
+  local note="$1"
+
+  if [[ "${TG_ENABLED:-false}" != "true" ]]; then
+    return 0
+  fi
+
+  if [[ -x "$BOT_WORKER" ]]; then
+    if bash "$BOT_WORKER" --send-panel "$note" >/dev/null 2>&1; then
+      return 0
+    fi
+    log "Telegram 面板推送失败，改发普通文字通知。"
+  fi
+
+  send_telegram "$note"
 }
 
 cf_api() {
@@ -129,7 +147,7 @@ main() {
     resp="$(cf_api POST "/zones/${zone_id}/dns_records" "$payload")" || die "创建 DNS 记录失败。"
     printf '%s' "$resp" | json_success || die "创建 DNS 记录未成功：$(printf '%s' "$resp" | jq -r '.errors[0].message // "未知错误"')"
     log "已创建 $RECORD_NAME -> $current_ip"
-    send_telegram "Cloudflare DDNS 已创建：$RECORD_NAME -> $current_ip"
+    send_telegram_panel "DDNS 已自动创建：$RECORD_NAME -> $current_ip"
     return 0
   fi
 
@@ -141,7 +159,7 @@ main() {
   resp="$(cf_api PUT "/zones/${zone_id}/dns_records/${record_id}" "$payload")" || die "更新 DNS 记录失败。"
   printf '%s' "$resp" | json_success || die "更新 DNS 记录未成功：$(printf '%s' "$resp" | jq -r '.errors[0].message // "未知错误"')"
   log "已更新 $RECORD_NAME：$old_ip -> $current_ip"
-  send_telegram "Cloudflare DDNS 已更新：$RECORD_NAME，$old_ip -> $current_ip"
+  send_telegram_panel "DDNS 已自动更新：$RECORD_NAME，$old_ip -> $current_ip"
 }
 
 main "$@"
