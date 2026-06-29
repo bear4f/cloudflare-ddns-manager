@@ -38,6 +38,7 @@
 **Telegram 控制面板**
 - 图文面板，按钮一键：换 IP、更新 DDNS、刷新、查看日志、启停定时器
 - 逐条显示**「公网 IP ↔ DNS 记录」同步状态**：`✅` 已同步 / `⚠️` 待更新 / `❔` 未知
+- 显示公网 IP 的**地区 / ISP 归属**（换 IP 后可确认落地），可在配置中关闭
 - HTML 富文本排版，操作进度在同一条消息内动态刷新
 - 仅响应授权的 `TG_CHAT_ID`，其余一律忽略
 
@@ -163,6 +164,8 @@ IP_CHANGE_WAIT_SECONDS='8'
 TG_ENABLED='false'
 TG_BOT_TOKEN=''
 TG_CHAT_ID=''
+
+GEO_ENABLED='true'                    # 面板显示 IP 地区/ISP 归属（会向第三方查询本机公网 IP）
 ```
 
 > 请勿把真实的 `cf_ddns.env` 上传到 GitHub。
@@ -224,7 +227,7 @@ systemctl status cf-ddns.service --no-pager
 
 ### 控制面板
 
-发送 `/start` 或 `/panel` 打开图文控制面板。面板会逐条显示记录同步状态，按钮如下：
+发送 `/start` 或 `/panel` 打开图文控制面板。面板会逐条显示记录同步状态，并在公网 IP 下方显示 `🌍 IP 归属`（地区 + ISP），按钮如下：
 
 ```text
 🔁 换 IP        调用 Boil 换 IP API，然后自动更新 Cloudflare DDNS
@@ -234,6 +237,8 @@ systemctl status cf-ddns.service --no-pager
 ▶️/⏸️ 定时器   一键启用或停用 systemd 定时器
 ℹ️ 帮助         查看可用命令
 ```
+
+> `🌍 IP 归属` 默认开启，会向第三方地理库（ip-api.com / ipwho.is）查询本机公网 IP。如不希望外发，在 `sudo ddns` → `1` 配置时关闭，或在 `cf_ddns.env` 设 `GEO_ENABLED='false'`。
 
 可用命令：
 

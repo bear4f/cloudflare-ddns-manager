@@ -372,8 +372,47 @@ render_records_block() {
   printf '%s' "${out%$'\n'}"
 }
 
+# 查询公网 IP 的地区 / ISP 归属（尽力而为，失败则静默）。
+# 默认启用，可在配置中关闭（GEO_ENABLED=false）。
+# 注意：会把本机公网 IP 发给第三方地理库查询。
+geo_lookup() {
+  local ip="$1" resp country region city isp place out
+  [[ "${GEO_ENABLED:-true}" == "true" ]] || return 1
+  [[ -n "$ip" && "$ip" != "未知" ]] || return 1
+
+  # 1) ip-api.com：支持中文本地化（免费版仅 HTTP）
+  resp="$(curl -fsS --connect-timeout 5 --max-time 8 \
+    "http://ip-api.com/json/${ip}?lang=zh-CN&fields=status,country,regionName,city,isp" 2>/dev/null || true)"
+  if [[ -n "$resp" ]] && jq -e '.status=="success"' >/dev/null 2>&1 <<<"$resp"; then
+    country="$(jq -r '.country // ""' <<<"$resp")"
+    region="$(jq -r '.regionName // ""' <<<"$resp")"
+    city="$(jq -r '.city // ""' <<<"$resp")"
+    isp="$(jq -r '.isp // ""' <<<"$resp")"
+  else
+    # 2) ipwho.is：HTTPS 备用（英文）
+    resp="$(curl -fsS --connect-timeout 5 --max-time 8 "https://ipwho.is/${ip}" 2>/dev/null || true)"
+    if [[ -n "$resp" ]] && jq -e '.success==true' >/dev/null 2>&1 <<<"$resp"; then
+      country="$(jq -r '.country // ""' <<<"$resp")"
+      region="$(jq -r '.region // ""' <<<"$resp")"
+      city="$(jq -r '.city // ""' <<<"$resp")"
+      isp="$(jq -r '.connection.isp // ""' <<<"$resp")"
+    else
+      return 1
+    fi
+  fi
+
+  place="$city"
+  [[ -z "$place" ]] && place="$region"
+  out="$country"
+  [[ -n "$place" && "$place" != "$country" ]] && out="${out:+$out }$place"
+  [[ -n "$isp" ]] && out="${out:+$out · }$isp"
+
+  [[ -n "$out" ]] || return 1
+  printf '%s\n' "$out"
+}
+
 build_panel_header() {
-  local record_type public_ip timer_state bot_state api_state interval zone_id records_block
+  local record_type public_ip timer_state bot_state api_state interval zone_id records_block geo header
   record_type="${RECORD_TYPE:-A}"
   public_ip="$(get_public_ip "$record_type")"   # 失败时本函数已输出「未知」
   timer_state="$(systemctl is-active cf-ddns.timer 2>/dev/null || printf 'unknown')"
@@ -384,16 +423,18 @@ build_panel_header() {
   zone_id="$(cf_zone_id 2>/dev/null || true)"
   records_block="$(render_records_block "$zone_id" "$record_type" "$public_ip")"
   [[ -n "$records_block" ]] || records_block="🧭 记录 | 未配置"
+  geo="$(geo_lookup "$public_ip" 2>/dev/null || true)"
 
-  printf '🚀 <b>Cloudflare DDNS 控制面板</b>\n\n🌐 公网 IP（%s）| <code>%s</code>\n%s\n🔁 换 IP API | %s\n⏱️ 定时器 | %s（每 %s）\n🤖 Bot | %s\n🕒 刷新于 | %s' \
-    "$record_type" \
-    "$(html_escape "$public_ip")" \
-    "$records_block" \
-    "$api_state" \
-    "$timer_state" \
-    "$(html_escape "$interval")" \
-    "$bot_state" \
-    "$(date '+%H:%M:%S')"
+  header="🚀 <b>Cloudflare DDNS 控制面板</b>"$'\n\n'
+  header+="🌐 公网 IP（${record_type}）| <code>$(html_escape "$public_ip")</code>"$'\n'
+  [[ -n "$geo" ]] && header+="🌍 IP 归属 | $(html_escape "$geo")"$'\n'
+  header+="${records_block}"$'\n'
+  header+="🔁 换 IP API | ${api_state}"$'\n'
+  header+="⏱️ 定时器 | ${timer_state}（每 $(html_escape "$interval")）"$'\n'
+  header+="🤖 Bot | ${bot_state}"$'\n'
+  header+="🕒 刷新于 | $(date '+%H:%M:%S')"
+
+  printf '%s' "$header"
 }
 
 panel_caption() {

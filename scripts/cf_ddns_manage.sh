@@ -44,6 +44,7 @@ load_env() {
   TG_ENABLED="false"
   TG_BOT_TOKEN=""
   TG_CHAT_ID=""
+  GEO_ENABLED="true"
   IP_CHANGE_ENABLED="false"
   IP_CHANGE_API_URL=""
   IP_CHANGE_API_FORMAT_JSON="true"
@@ -225,6 +226,15 @@ COMMENT_EOF
     printf 'TG_ENABLED=%q\n' "$TG_ENABLED"
     printf 'TG_BOT_TOKEN=%q\n' "$TG_BOT_TOKEN"
     printf 'TG_CHAT_ID=%q\n' "$TG_CHAT_ID"
+
+    echo
+    cat <<'COMMENT_EOF'
+# 面板显示选项
+# GEO_ENABLED=true 时，Telegram 面板会显示公网 IP 的地区 / ISP 归属。
+# 该功能会把本机公网 IP 发送给第三方地理库（ip-api.com / ipwho.is）查询。
+COMMENT_EOF
+
+    printf 'GEO_ENABLED=%q\n' "$GEO_ENABLED"
   } > "$tmp"
 
   install -m 600 "$tmp" "$ENV_FILE"
@@ -363,6 +373,7 @@ configure_env() {
   if [[ "$TG_ENABLED" == "true" ]]; then
     prompt_secret_keep TG_BOT_TOKEN "请输入 Telegram Bot Token"
     prompt_sensitive_text_keep TG_CHAT_ID "请输入 Telegram Chat ID" "123456789"
+    prompt_bool_keep GEO_ENABLED "是否在面板显示 IP 地区/ISP 归属？（会向第三方查询本机公网 IP）" "${GEO_ENABLED:-true}"
   else
     TG_BOT_TOKEN=""
     TG_CHAT_ID=""
