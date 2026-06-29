@@ -70,11 +70,50 @@ resolve_panel_image_file() {
     return 0
   fi
 
-  if [[ -f "$BASE_DIR/panel_illustration.jpg" ]]; then
-    printf '%s\n' "$BASE_DIR/panel_illustration.jpg"
-  elif [[ -f "$BASE_DIR/panel_illustration.png" ]]; then
+  if [[ -f "$BASE_DIR/panel_illustration.png" ]]; then
     printf '%s\n' "$BASE_DIR/panel_illustration.png"
+  elif [[ -f "$BASE_DIR/panel_illustration.jpg" ]]; then
+    printf '%s\n' "$BASE_DIR/panel_illustration.jpg"
   fi
+}
+
+send_photo_response() {
+  local chat_id="$1"
+  local caption="$2"
+  local reply_markup="$3"
+  local image_file="$4"
+  local tmp_body http_status curl_status response
+
+  tmp_body="$(mktemp)"
+  curl_status=0
+  http_status="$(curl -sS --retry 2 --connect-timeout 10 --max-time 60 \
+    -w '%{http_code}' \
+    -o "$tmp_body" \
+    -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
+    --form-string "chat_id=${chat_id}" \
+    -F "photo=@${image_file}" \
+    --form-string "caption=${caption}" \
+    --form-string "reply_markup=${reply_markup}" 2>&1)" || curl_status=$?
+
+  response="$(cat "$tmp_body" 2>/dev/null || true)"
+  rm -f "$tmp_body"
+
+  if [[ "$curl_status" -ne 0 ]]; then
+    log_only "Telegram 图片面板 curl 失败：$http_status；响应：$response"
+    return 1
+  fi
+
+  if [[ "$http_status" != 2* ]]; then
+    log_only "Telegram 图片面板 HTTP ${http_status}：$response"
+    return 1
+  fi
+
+  if ! jq -e '.ok == true' >/dev/null 2>&1 <<<"$response"; then
+    log_only "Telegram 图片面板响应异常：$response"
+    return 1
+  fi
+
+  printf '%s\n' "$response"
 }
 
 send_panel_text_response() {
@@ -167,23 +206,17 @@ panel_caption() {
 send_panel_response() {
   local chat_id="$1"
   local note="${2:-面板就绪}"
-  local caption reply_markup image_file image_mime response
+  local caption reply_markup image_file response
 
   caption="$(panel_caption "$note")"
   reply_markup="$(panel_markup)"
   image_file="$(resolve_panel_image_file)"
-  image_mime="image/jpeg"
-  [[ "$image_file" == *.png ]] && image_mime="image/png"
 
   if [[ -n "$image_file" && -f "$image_file" ]]; then
-    if response="$(tg_api sendPhoto \
-      --form-string "chat_id=${chat_id}" \
-      -F "photo=@${image_file};type=${image_mime}" \
-      --form-string "caption=${caption}" \
-      --form-string "reply_markup=${reply_markup}" 2>&1)"; then
+    if response="$(send_photo_response "$chat_id" "$caption" "$reply_markup" "$image_file")"; then
       printf '%s\n' "$response"
     else
-      log_only "Telegram 图片面板发送失败，已改发文字面板：$response"
+      log_only "Telegram 图片面板发送失败，已改发文字面板。"
       send_panel_text_response "$chat_id" "$caption"
     fi
   else
