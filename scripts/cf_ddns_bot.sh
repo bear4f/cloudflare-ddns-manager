@@ -7,7 +7,14 @@ WORKER="$BASE_DIR/cf_ddns.sh"
 CHANGER="$BASE_DIR/cf_change_ip.sh"
 LOG_FILE="/var/log/cf_ddns.log"
 BOT_LOCK_FILE="/run/cf-ddns-bot-command.lock"
-PANEL_IMAGE_FILE="${PANEL_IMAGE_FILE:-$BASE_DIR/panel_illustration.png}"
+PANEL_IMAGE_FILE="${PANEL_IMAGE_FILE:-}"
+if [[ -z "$PANEL_IMAGE_FILE" ]]; then
+  if [[ -f "$BASE_DIR/panel_illustration.jpg" ]]; then
+    PANEL_IMAGE_FILE="$BASE_DIR/panel_illustration.jpg"
+  else
+    PANEL_IMAGE_FILE="$BASE_DIR/panel_illustration.png"
+  fi
+fi
 
 log() {
   local message="$1"
