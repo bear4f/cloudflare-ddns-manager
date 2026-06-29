@@ -75,6 +75,7 @@ configure_bot_commands() {
 
   payload="$(jq -n '{
     commands: [
+      {command:"start", description:"打开控制面板"},
       {command:"panel", description:"打开控制面板"},
       {command:"changeip", description:"换 IP 并更新 DDNS"},
       {command:"ddns", description:"立即运行 DDNS"},
@@ -222,6 +223,7 @@ handle_help() {
   send_message "$chat_id" "ℹ️ 使用帮助
 
 /panel - 打开按钮控制面板
+/start - 打开按钮控制面板
 /changeip - 调用换 IP API，然后自动更新 Cloudflare DDNS
 /ddns - 只立即运行一次 DDNS 检测
 /status - 查看当前公网 IP 和服务状态
