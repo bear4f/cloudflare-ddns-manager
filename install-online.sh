@@ -65,7 +65,7 @@ install_remote_asset() {
   download_file "${RAW_BASE}/${remote_path}" "$tmp_file"
   perl -0777 -ne 's/[^0-9A-Fa-f]//g; print pack("H*", $_)' "$tmp_file" > "$target_path"
   byte_count="$(wc -c < "$target_path" | tr -d ' ')"
-  if [[ "$target_path" == *.jpg && "$byte_count" -lt 1000 ]]; then
+  if [[ "$target_path" == *.jpg || "$target_path" == *.png ]] && [[ "$byte_count" -lt 1000 ]]; then
     echo "图片资源不完整：${target_path} 当前 ${byte_count} 字节，已停止安装。"
     exit 1
   fi
@@ -85,8 +85,8 @@ main() {
   install_remote_script "scripts/cf_change_ip.sh" "$BASE_DIR/cf_change_ip.sh" "$tmp_dir/cf_change_ip.sh"
   install_remote_script "scripts/cf_ddns_bot.sh" "$BASE_DIR/cf_ddns_bot.sh" "$tmp_dir/cf_ddns_bot.sh"
   install_remote_script "scripts/cf_ddns_manage.sh" "$BASE_DIR/cf_ddns_manage.sh" "$tmp_dir/cf_ddns_manage.sh"
+  install_remote_asset "assets/panel_illustration.png.hex" "$BASE_DIR/panel_illustration.png" "$tmp_dir/panel_illustration.png.hex"
   install_remote_asset "assets/panel_illustration.jpg.hex" "$BASE_DIR/panel_illustration.jpg" "$tmp_dir/panel_illustration.jpg.hex"
-  rm -f "$BASE_DIR/panel_illustration.png"
 
   ln -sf "$BASE_DIR/cf_ddns_manage.sh" "$BIN_LINK"
   chmod 755 "$BIN_LINK"
