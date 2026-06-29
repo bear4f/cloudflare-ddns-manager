@@ -70,10 +70,10 @@ resolve_panel_image_file() {
     return 0
   fi
 
-  if [[ -f "$BASE_DIR/panel_illustration.png" ]]; then
-    printf '%s\n' "$BASE_DIR/panel_illustration.png"
-  elif [[ -f "$BASE_DIR/panel_illustration.jpg" ]]; then
+  if [[ -f "$BASE_DIR/panel_illustration.jpg" ]]; then
     printf '%s\n' "$BASE_DIR/panel_illustration.jpg"
+  elif [[ -f "$BASE_DIR/panel_illustration.png" ]]; then
+    printf '%s\n' "$BASE_DIR/panel_illustration.png"
   fi
 }
 
