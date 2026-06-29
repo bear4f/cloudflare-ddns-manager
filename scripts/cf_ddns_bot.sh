@@ -8,17 +8,15 @@ CHANGER="$BASE_DIR/cf_change_ip.sh"
 LOG_FILE="/var/log/cf_ddns.log"
 BOT_LOCK_FILE="/run/cf-ddns-bot-command.lock"
 PANEL_IMAGE_FILE="${PANEL_IMAGE_FILE:-}"
-if [[ -z "$PANEL_IMAGE_FILE" ]]; then
-  if [[ -f "$BASE_DIR/panel_illustration.jpg" ]]; then
-    PANEL_IMAGE_FILE="$BASE_DIR/panel_illustration.jpg"
-  else
-    PANEL_IMAGE_FILE="$BASE_DIR/panel_illustration.png"
-  fi
-fi
 
 log() {
   local message="$1"
   printf '[%s] %s\n' "$(date '+%F %T')" "$message" | tee -a "$LOG_FILE"
+}
+
+log_only() {
+  local message="$1"
+  printf '[%s] %s\n' "$(date '+%F %T')" "$message" >> "$LOG_FILE"
 }
 
 die() {
@@ -64,6 +62,19 @@ send_json() {
     -H "Content-Type: application/json" \
     --data "$payload" \
     >/dev/null || log "Telegram ${method} 请求失败。"
+}
+
+resolve_panel_image_file() {
+  if [[ -n "${PANEL_IMAGE_FILE:-}" && -f "$PANEL_IMAGE_FILE" ]]; then
+    printf '%s\n' "$PANEL_IMAGE_FILE"
+    return 0
+  fi
+
+  if [[ -f "$BASE_DIR/panel_illustration.jpg" ]]; then
+    printf '%s\n' "$BASE_DIR/panel_illustration.jpg"
+  elif [[ -f "$BASE_DIR/panel_illustration.png" ]]; then
+    printf '%s\n' "$BASE_DIR/panel_illustration.png"
+  fi
 }
 
 send_panel_text_response() {
@@ -156,19 +167,27 @@ panel_caption() {
 send_panel_response() {
   local chat_id="$1"
   local note="${2:-面板就绪}"
-  local caption reply_markup
+  local caption reply_markup image_file image_mime response
 
   caption="$(panel_caption "$note")"
   reply_markup="$(panel_markup)"
+  image_file="$(resolve_panel_image_file)"
+  image_mime="image/jpeg"
+  [[ "$image_file" == *.png ]] && image_mime="image/png"
 
-  if [[ -f "$PANEL_IMAGE_FILE" ]]; then
-    tg_api sendPhoto \
-      -F "chat_id=${chat_id}" \
-      -F "photo=@${PANEL_IMAGE_FILE}" \
-      -F "caption=${caption}" \
-      -F "reply_markup=${reply_markup}" \
-      || send_panel_text_response "$chat_id" "$caption"
+  if [[ -n "$image_file" && -f "$image_file" ]]; then
+    if response="$(tg_api sendPhoto \
+      --form-string "chat_id=${chat_id}" \
+      -F "photo=@${image_file};type=${image_mime}" \
+      --form-string "caption=${caption}" \
+      --form-string "reply_markup=${reply_markup}" 2>&1)"; then
+      printf '%s\n' "$response"
+    else
+      log_only "Telegram 图片面板发送失败，已改发文字面板：$response"
+      send_panel_text_response "$chat_id" "$caption"
+    fi
   else
+    log_only "未找到面板图片，已改发文字面板。"
     send_panel_text_response "$chat_id" "$caption"
   fi
 }
@@ -426,6 +445,13 @@ main() {
 
   touch "$LOG_FILE"
   chmod 600 "$LOG_FILE" 2>/dev/null || true
+
+  if [[ "${1:-}" == "--send-panel" ]]; then
+    shift
+    send_panel "$TG_CHAT_ID" "${*:-面板就绪}"
+    exit 0
+  fi
+
   configure_bot_commands
   log "Telegram Bot 命令服务已启动。"
 
