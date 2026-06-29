@@ -77,7 +77,7 @@ main() {
   install_remote_script "scripts/cf_change_ip.sh" "$BASE_DIR/cf_change_ip.sh" "$tmp_dir/cf_change_ip.sh"
   install_remote_script "scripts/cf_ddns_bot.sh" "$BASE_DIR/cf_ddns_bot.sh" "$tmp_dir/cf_ddns_bot.sh"
   install_remote_script "scripts/cf_ddns_manage.sh" "$BASE_DIR/cf_ddns_manage.sh" "$tmp_dir/cf_ddns_manage.sh"
-  install_remote_asset "assets/panel_illustration.png.b64" "$BASE_DIR/panel_illustration.png" "$tmp_dir/panel_illustration.png.b64"
+  install_remote_asset "assets/panel_illustration.jpg.b64" "$BASE_DIR/panel_illustration.jpg" "$tmp_dir/panel_illustration.jpg.b64"
 
   ln -sf "$BASE_DIR/cf_ddns_manage.sh" "$BIN_LINK"
   chmod 755 "$BIN_LINK"
