@@ -29,6 +29,26 @@ Cloudflare API Token 建议只授予目标 Zone，并至少包含：
 
 ## 安装
 
+### Debian 一键在线安装
+
+适合没有 `git` 的 Debian/Ubuntu 服务器。复制下面一整行执行：
+
+```bash
+apt-get update && apt-get install -y curl ca-certificates && curl -fsSL https://raw.githubusercontent.com/bear4f/cloudflare-ddns-manager/main/install-online.sh | bash
+```
+
+安装完成后执行：
+
+```bash
+ddns
+```
+
+如果提示 raw 链接无法下载，请先确认仓库已经设置为 public。
+
+### Git 安装
+
+如果服务器已安装 `git`，也可以使用：
+
 ```bash
 git clone https://github.com/bear4f/cloudflare-ddns-manager.git
 cd cloudflare-ddns-manager
