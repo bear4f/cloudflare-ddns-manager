@@ -17,7 +17,7 @@ install_deps() {
   local missing=()
   local cmd=""
 
-  for cmd in curl jq flock; do
+  for cmd in curl jq flock base64; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
 
@@ -27,10 +27,10 @@ install_deps() {
 
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    apt-get install -y curl jq util-linux ca-certificates
+    apt-get install -y curl jq util-linux coreutils ca-certificates
   else
     echo "缺少依赖：${missing[*]}"
-    echo "请先安装：curl jq util-linux ca-certificates"
+    echo "请先安装：curl jq util-linux coreutils ca-certificates"
     exit 1
   fi
 }
@@ -53,6 +53,17 @@ install_remote_script() {
   install -m 700 "$tmp_file" "$target_path"
 }
 
+install_remote_asset() {
+  local remote_path="$1"
+  local target_path="$2"
+  local tmp_file="$3"
+
+  echo "拉取：${remote_path}"
+  download_file "${RAW_BASE}/${remote_path}" "$tmp_file"
+  base64 -d "$tmp_file" > "$target_path"
+  chmod 600 "$target_path"
+}
+
 main() {
   install_deps
 
@@ -66,6 +77,7 @@ main() {
   install_remote_script "scripts/cf_change_ip.sh" "$BASE_DIR/cf_change_ip.sh" "$tmp_dir/cf_change_ip.sh"
   install_remote_script "scripts/cf_ddns_bot.sh" "$BASE_DIR/cf_ddns_bot.sh" "$tmp_dir/cf_ddns_bot.sh"
   install_remote_script "scripts/cf_ddns_manage.sh" "$BASE_DIR/cf_ddns_manage.sh" "$tmp_dir/cf_ddns_manage.sh"
+  install_remote_asset "assets/panel_illustration.png.b64" "$BASE_DIR/panel_illustration.png" "$tmp_dir/panel_illustration.png.b64"
 
   ln -sf "$BASE_DIR/cf_ddns_manage.sh" "$BIN_LINK"
   chmod 755 "$BIN_LINK"
