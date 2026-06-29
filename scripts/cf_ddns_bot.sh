@@ -8,6 +8,7 @@ CHANGER="$BASE_DIR/cf_change_ip.sh"
 LOG_FILE="/var/log/cf_ddns.log"
 BOT_LOCK_FILE="/run/cf-ddns-bot-command.lock"
 PANEL_IMAGE_FILE="${PANEL_IMAGE_FILE:-}"
+MIN_PANEL_IMAGE_BYTES=17000
 
 log() {
   local message="$1"
@@ -26,6 +27,30 @@ die() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少依赖：$1"
+}
+
+is_valid_panel_image() {
+  local image_file="$1"
+  local byte_count magic
+
+  [[ -f "$image_file" ]] || return 1
+  byte_count="$(wc -c < "$image_file" 2>/dev/null | tr -d ' ')"
+  [[ "$byte_count" =~ ^[0-9]+$ ]] || return 1
+
+  case "$image_file" in
+    *.jpg|*.jpeg)
+      [[ "$byte_count" -ge "$MIN_PANEL_IMAGE_BYTES" ]] || return 1
+      magic="$(LC_ALL=C od -An -N2 -tx1 "$image_file" 2>/dev/null | tr -d ' \n')"
+      [[ "$magic" == "ffd8" ]]
+      ;;
+    *.png)
+      magic="$(LC_ALL=C od -An -N4 -tx1 "$image_file" 2>/dev/null | tr -d ' \n')"
+      [[ "$magic" == "89504e47" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 load_config() {
@@ -65,14 +90,14 @@ send_json() {
 }
 
 resolve_panel_image_file() {
-  if [[ -n "${PANEL_IMAGE_FILE:-}" && -f "$PANEL_IMAGE_FILE" ]]; then
+  if [[ -n "${PANEL_IMAGE_FILE:-}" ]] && is_valid_panel_image "$PANEL_IMAGE_FILE"; then
     printf '%s\n' "$PANEL_IMAGE_FILE"
     return 0
   fi
 
-  if [[ -f "$BASE_DIR/panel_illustration.jpg" ]]; then
+  if is_valid_panel_image "$BASE_DIR/panel_illustration.jpg"; then
     printf '%s\n' "$BASE_DIR/panel_illustration.jpg"
-  elif [[ -f "$BASE_DIR/panel_illustration.png" ]]; then
+  elif is_valid_panel_image "$BASE_DIR/panel_illustration.png"; then
     printf '%s\n' "$BASE_DIR/panel_illustration.png"
   fi
 }
