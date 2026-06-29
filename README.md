@@ -10,6 +10,8 @@
 - 支持 Cloudflare proxied 小云朵开关
 - 支持 systemd timer 定时运行
 - 支持 Telegram 在记录创建或 IP 变化更新成功后推送通知
+- 支持配置 Boil IP 面板专属换 IP API
+- 支持 Telegram Bot 命令 `/changeip` 一键换 IP 并自动更新 DDNS
 - 配置文件使用 600 权限保存，避免密钥被普通用户读取
 
 ## 环境要求
@@ -36,6 +38,8 @@ sudo ./install.sh
 安装后会创建：
 
 - `/usr/local/ddns/cf_ddns.sh`
+- `/usr/local/ddns/cf_change_ip.sh`
+- `/usr/local/ddns/cf_ddns_bot.sh`
 - `/usr/local/ddns/cf_ddns_manage.sh`
 - `/usr/local/bin/ddns`
 
@@ -55,6 +59,9 @@ sudo ddns
 4. 查看状态与日志
 5. 测试 Telegram 推送
 6. 停用 systemd 定时器
+7. 立即调用换 IP API，并更新 DDNS
+8. 安装或更新 Telegram Bot 命令服务
+9. 停用 Telegram Bot 命令服务
 
 首次使用建议按这个顺序操作：
 
@@ -62,6 +69,13 @@ sudo ddns
 1) 初始化/修改 Cloudflare 与 Telegram 配置
 2) 立即运行一次 DDNS 检测
 3) 安装/更新 systemd 定时器
+```
+
+如果需要使用换 IP API 和 Telegram 命令，建议继续执行：
+
+```text
+7) 立即调用换 IP API，并更新 DDNS
+8) 安装/更新 Telegram Bot 命令服务
 ```
 
 ## 配置文件
@@ -81,12 +95,46 @@ RECORD_NAME='ddns.example.com'
 TTL='120'
 PROXY='false'
 
+IP_CHANGE_ENABLED='false'
+IP_CHANGE_API_URL=''
+IP_CHANGE_API_FORMAT_JSON='true'
+IP_CHANGE_WAIT_SECONDS='8'
+
 TG_ENABLED='false'
 TG_BOT_TOKEN=''
 TG_CHAT_ID=''
 ```
 
 请不要把真实的 `cf_ddns.env` 上传到 GitHub。
+
+## Boil 换 IP API
+
+如果已获得 Boil IP 面板内测 API，可以在 `sudo ddns` 菜单的配置项中启用换 IP API，并填入面板生成的专属链接，例如：
+
+```text
+https://ippanel.boil.network/api/your-private-token
+```
+
+默认会自动在请求末尾追加 `format=json`：
+
+```text
+https://ippanel.boil.network/api/your-private-token?format=json
+```
+
+如果你的 API 链接已经包含 `format=json` 或其他查询参数，脚本会自动处理。API 链接通常等同于密钥，请不要发到公开聊天、截图或仓库。
+
+配置完成后，可以在菜单中选择：
+
+```text
+7) 立即调用换 IP API，并更新 DDNS
+```
+
+流程是：
+
+1. 请求换 IP API
+2. 等待 `IP_CHANGE_WAIT_SECONDS` 秒
+3. 重新获取公网 IP
+4. 更新 Cloudflare DNS A 记录
 
 ## 日志
 
@@ -139,11 +187,46 @@ sudo ddns
 
 Telegram 只会在 DNS 记录创建或 IP 变化更新成功后推送。
 
+## Telegram Bot 命令
+
+如果想直接在 Telegram 中换 IP，需要在 `sudo ddns` 菜单中先完成：
+
+1. 启用 Telegram 通知并填写 `TG_BOT_TOKEN`、`TG_CHAT_ID`
+2. 启用并填写 Boil 换 IP API
+3. 选择 `8) 安装/更新 Telegram Bot 命令服务`
+
+安装后会创建：
+
+- `/etc/systemd/system/cf-ddns-bot.service`
+
+可用命令：
+
+```text
+/changeip - 调用换 IP API，然后自动更新 Cloudflare DDNS
+/ddns - 只立即运行一次 DDNS 检测
+/status - 查看当前公网 IP 和服务状态
+/help - 查看帮助
+```
+
+安全限制：
+
+- Bot 只响应配置文件里的 `TG_CHAT_ID`
+- 其他 Chat ID 会被忽略
+- `/changeip` 同一时间只允许一个任务运行，避免重复换 IP
+
+查看 Bot 服务状态：
+
+```bash
+systemctl status cf-ddns-bot.service --no-pager
+```
+
 ## 卸载
 
 ```bash
 sudo systemctl disable --now cf-ddns.timer 2>/dev/null || true
+sudo systemctl disable --now cf-ddns-bot.service 2>/dev/null || true
 sudo rm -f /etc/systemd/system/cf-ddns.service /etc/systemd/system/cf-ddns.timer
+sudo rm -f /etc/systemd/system/cf-ddns-bot.service
 sudo systemctl daemon-reload
 sudo rm -f /usr/local/bin/ddns
 sudo rm -rf /usr/local/ddns
@@ -154,5 +237,6 @@ sudo rm -rf /usr/local/ddns
 ## 安全提醒
 
 - 不要把 Cloudflare API Token、Telegram Bot Token、真实域名配置提交到公开仓库
+- 不要公开 Boil 换 IP API 专属链接，它可以触发你的服务器换 IP
 - 推荐使用权限最小化的 Cloudflare API Token
 - 如果仓库设为 public，请先确认 README、日志、截图、配置文件都没有敏感信息
