@@ -8,7 +8,7 @@ CHANGER="$BASE_DIR/cf_change_ip.sh"
 LOG_FILE="/var/log/cf_ddns.log"
 BOT_LOCK_FILE="/run/cf-ddns-bot-command.lock"
 PANEL_IMAGE_FILE="${PANEL_IMAGE_FILE:-}"
-MIN_PANEL_IMAGE_BYTES=17000
+MIN_PANEL_IMAGE_BYTES=1000
 
 log() {
   local message="$1"
