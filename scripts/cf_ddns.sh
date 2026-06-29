@@ -7,6 +7,19 @@ LOG_FILE="/var/log/cf_ddns.log"
 LOCK_FILE="/run/cf-ddns.lock"
 BOT_WORKER="$BASE_DIR/cf_ddns_bot.sh"
 CF_API_BASE="https://api.cloudflare.com/client/v4"
+MAX_LOG_BYTES="${MAX_LOG_BYTES:-2097152}"   # 2 MiB，超过则只保留最后 1000 行
+
+# 公网 IP 数据源（多源容错，任一可用即可）。
+PUBLIC_IP4_SOURCES=(
+  "https://api.ipify.org"
+  "https://ipv4.icanhazip.com"
+  "https://ifconfig.me/ip"
+)
+PUBLIC_IP6_SOURCES=(
+  "https://api6.ipify.org"
+  "https://ipv6.icanhazip.com"
+  "https://ifconfig.co/ip"
+)
 
 log() {
   local message="$1"
@@ -20,6 +33,22 @@ die() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少依赖：$1"
+}
+
+# 日志轮转：超过上限只保留最后 1000 行，避免无限增长。
+cap_log_file() {
+  [[ -f "$LOG_FILE" ]] || return 0
+  local size
+  size="$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d ' ')"
+  [[ "$size" =~ ^[0-9]+$ ]] || return 0
+  if [[ "$size" -gt "$MAX_LOG_BYTES" ]]; then
+    local tmp
+    tmp="$(mktemp)"
+    tail -n 1000 "$LOG_FILE" > "$tmp" 2>/dev/null || true
+    cat "$tmp" > "$LOG_FILE" 2>/dev/null || true
+    rm -f "$tmp"
+    chmod 600 "$LOG_FILE" 2>/dev/null || true
+  fi
 }
 
 send_telegram() {
@@ -87,15 +116,84 @@ urlencode() {
   jq -rn --arg value "$1" '$value|@uri'
 }
 
-get_public_ip() {
-  local ip=""
-  ip="$(curl -fsS --retry 3 --connect-timeout 5 --max-time 15 https://api.ipify.org || true)"
+is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+is_ipv6() { [[ "$1" == *:* && "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
 
-  if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    die "无法获取有效公网 IPv4。"
+# 根据记录类型获取公网 IP，多源轮询。
+get_public_ip() {
+  local record_type="${1:-A}"
+  local sources=() curl_proto ip src
+
+  if [[ "$record_type" == "AAAA" ]]; then
+    sources=("${PUBLIC_IP6_SOURCES[@]}")
+    curl_proto="-6"
+  else
+    sources=("${PUBLIC_IP4_SOURCES[@]}")
+    curl_proto="-4"
   fi
 
-  printf '%s\n' "$ip"
+  for src in "${sources[@]}"; do
+    ip="$(curl -fsS "$curl_proto" --retry 1 --connect-timeout 5 --max-time 10 "$src" 2>/dev/null | tr -d '[:space:]')" || true
+    if [[ "$record_type" == "AAAA" ]]; then
+      is_ipv6 "$ip" && { printf '%s\n' "$ip"; return 0; }
+    else
+      is_ipv4 "$ip" && { printf '%s\n' "$ip"; return 0; }
+    fi
+  done
+
+  die "无法从任一数据源获取有效公网 ${record_type} 地址。"
+}
+
+# 把 RECORD_NAME 拆成数组（支持逗号/空格分隔的多条记录）。
+split_records() {
+  local raw="$1"
+  raw="${raw//,/ }"
+  printf '%s\n' $raw
+}
+
+# 更新单条记录；输出一行变更摘要供汇总，未变化则不输出。
+update_one_record() {
+  local zone_id="$1" record_name="$2" record_type="$3" current_ip="$4"
+  local record_query record_resp record_id old_ip payload resp
+
+  record_query="$(urlencode "$record_name")"
+  record_resp="$(cf_api GET "/zones/${zone_id}/dns_records?type=${record_type}&name=${record_query}")" \
+    || { log "查询 DNS 记录失败：$record_name"; return 1; }
+  printf '%s' "$record_resp" | json_success \
+    || { log "DNS 记录查询未成功（$record_name）：$(printf '%s' "$record_resp" | jq -r '.errors[0].message // "未知错误"')"; return 1; }
+
+  record_id="$(printf '%s' "$record_resp" | jq -r '.result[0].id // empty')"
+  old_ip="$(printf '%s' "$record_resp" | jq -r '.result[0].content // empty')"
+
+  payload="$(jq -n \
+    --arg type "$record_type" \
+    --arg name "$record_name" \
+    --arg content "$current_ip" \
+    --argjson ttl "${TTL:-120}" \
+    --argjson proxied "${PROXY:-false}" \
+    '{type:$type,name:$name,content:$content,ttl:$ttl,proxied:$proxied}')"
+
+  if [[ -z "$record_id" ]]; then
+    resp="$(cf_api POST "/zones/${zone_id}/dns_records" "$payload")" \
+      || { log "创建 DNS 记录失败：$record_name"; return 1; }
+    printf '%s' "$resp" | json_success \
+      || { log "创建 DNS 记录未成功（$record_name）：$(printf '%s' "$resp" | jq -r '.errors[0].message // "未知错误"')"; return 1; }
+    log "已创建 $record_name -> $current_ip"
+    printf '已创建 %s -> %s\n' "$record_name" "$current_ip"
+    return 0
+  fi
+
+  if [[ "$old_ip" == "$current_ip" ]]; then
+    log "$record_name IP 未变化：$current_ip"
+    return 0
+  fi
+
+  resp="$(cf_api PUT "/zones/${zone_id}/dns_records/${record_id}" "$payload")" \
+    || { log "更新 DNS 记录失败：$record_name"; return 1; }
+  printf '%s' "$resp" | json_success \
+    || { log "更新 DNS 记录未成功（$record_name）：$(printf '%s' "$resp" | jq -r '.errors[0].message // "未知错误"')"; return 1; }
+  log "已更新 $record_name：$old_ip -> $current_ip"
+  printf '已更新 %s：%s -> %s\n' "$record_name" "$old_ip" "$current_ip"
 }
 
 main() {
@@ -106,6 +204,9 @@ main() {
   [[ -f "$ENV_FILE" ]] || die "找不到配置文件：$ENV_FILE，请先执行 ddns 初始化配置。"
   # shellcheck disable=SC1090
   source "$ENV_FILE"
+
+  local record_type="${RECORD_TYPE:-A}"
+  [[ "$record_type" == "A" || "$record_type" == "AAAA" ]] || die "RECORD_TYPE 必须是 A 或 AAAA。"
 
   [[ -n "${CF_API_TOKEN:-}" ]] || die "CF_API_TOKEN 不能为空。"
   [[ -n "${ZONE_NAME:-}" ]] || die "ZONE_NAME 不能为空。"
@@ -118,48 +219,42 @@ main() {
 
   touch "$LOG_FILE"
   chmod 600 "$LOG_FILE" 2>/dev/null || true
+  cap_log_file
 
-  local current_ip zone_query zone_resp zone_id record_query record_resp record_id old_ip payload resp
-  current_ip="$(get_public_ip)"
+  local current_ip zone_query zone_resp zone_id
+  current_ip="$(get_public_ip "$record_type")"
   zone_query="$(urlencode "$ZONE_NAME")"
-  record_query="$(urlencode "$RECORD_NAME")"
 
   zone_resp="$(cf_api GET "/zones?name=${zone_query}&status=active")" || die "查询 Cloudflare Zone 失败。"
   printf '%s' "$zone_resp" | json_success || die "Cloudflare Zone 查询未成功：$(printf '%s' "$zone_resp" | jq -r '.errors[0].message // "未知错误"')"
   zone_id="$(printf '%s' "$zone_resp" | jq -r '.result[0].id // empty')"
   [[ -n "$zone_id" ]] || die "未找到 Zone：$ZONE_NAME"
 
-  record_resp="$(cf_api GET "/zones/${zone_id}/dns_records?type=A&name=${record_query}")" || die "查询 DNS 记录失败。"
-  printf '%s' "$record_resp" | json_success || die "Cloudflare DNS 记录查询未成功：$(printf '%s' "$record_resp" | jq -r '.errors[0].message // "未知错误"')"
+  local -a records=()
+  local _r
+  while IFS= read -r _r; do
+    [[ -n "$_r" ]] && records+=("$_r")
+  done < <(split_records "$RECORD_NAME")
 
-  record_id="$(printf '%s' "$record_resp" | jq -r '.result[0].id // empty')"
-  old_ip="$(printf '%s' "$record_resp" | jq -r '.result[0].content // empty')"
+  [[ "${#records[@]}" -gt 0 ]] || die "RECORD_NAME 解析后为空。"
 
-  payload="$(jq -n \
-    --arg type "A" \
-    --arg name "$RECORD_NAME" \
-    --arg content "$current_ip" \
-    --argjson ttl "${TTL:-120}" \
-    --argjson proxied "${PROXY:-false}" \
-    '{type:$type,name:$name,content:$content,ttl:$ttl,proxied:$proxied}')"
+  local changes="" line rc=0
+  local record
+  for record in "${records[@]}"; do
+    [[ -n "$record" ]] || continue
+    if line="$(update_one_record "$zone_id" "$record" "$record_type" "$current_ip")"; then
+      [[ -n "$line" ]] && changes+="${line}"$'\n'
+    else
+      rc=1
+    fi
+  done
 
-  if [[ -z "$record_id" ]]; then
-    resp="$(cf_api POST "/zones/${zone_id}/dns_records" "$payload")" || die "创建 DNS 记录失败。"
-    printf '%s' "$resp" | json_success || die "创建 DNS 记录未成功：$(printf '%s' "$resp" | jq -r '.errors[0].message // "未知错误"')"
-    log "已创建 $RECORD_NAME -> $current_ip"
-    send_telegram_panel "DDNS 已自动创建：$RECORD_NAME -> $current_ip"
-    return 0
+  if [[ -n "$changes" ]]; then
+    send_telegram_panel "DDNS 变更（$record_type）：
+${changes%$'\n'}"
   fi
 
-  if [[ "$old_ip" == "$current_ip" ]]; then
-    log "$RECORD_NAME IP 未变化：$current_ip"
-    return 0
-  fi
-
-  resp="$(cf_api PUT "/zones/${zone_id}/dns_records/${record_id}" "$payload")" || die "更新 DNS 记录失败。"
-  printf '%s' "$resp" | json_success || die "更新 DNS 记录未成功：$(printf '%s' "$resp" | jq -r '.errors[0].message // "未知错误"')"
-  log "已更新 $RECORD_NAME：$old_ip -> $current_ip"
-  send_telegram_panel "DDNS 已自动更新：$RECORD_NAME，$old_ip -> $current_ip"
+  return "$rc"
 }
 
 main "$@"

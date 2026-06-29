@@ -69,6 +69,27 @@ install_remote_asset() {
     echo "图片资源不完整：${target_path} 当前 ${byte_count} 字节，已停止安装。"
     exit 1
   fi
+  # 校验图片结尾标记，避免装进截断的素材（PNG 缺 IEND 会触发 Telegram IMAGE_PROCESS_FAILED）。
+  case "$target_path" in
+    *.png)
+      local png_magic png_trailer
+      png_magic="$(LC_ALL=C od -An -N8 -tx1 "$target_path" | tr -d ' \n')"
+      png_trailer="$(LC_ALL=C tail -c 12 "$target_path" | od -An -tx1 | tr -d ' \n')"
+      if [[ "$png_magic" != "89504e470d0a1a0a" || "$png_trailer" != "0000000049454e44ae426082" ]]; then
+        echo "PNG 图片损坏（签名或 IEND 结尾不符）：${target_path}，已停止安装。"
+        exit 1
+      fi
+      ;;
+    *.jpg|*.jpeg)
+      local jpg_magic jpg_trailer
+      jpg_magic="$(LC_ALL=C od -An -N2 -tx1 "$target_path" | tr -d ' \n')"
+      jpg_trailer="$(LC_ALL=C tail -c 2 "$target_path" | od -An -tx1 | tr -d ' \n')"
+      if [[ "$jpg_magic" != "ffd8" || "$jpg_trailer" != "ffd9" ]]; then
+        echo "JPG 图片损坏（缺少 SOI/EOI 标记）：${target_path}，已停止安装。"
+        exit 1
+      fi
+      ;;
+  esac
   chmod 600 "$target_path"
 }
 

@@ -1,17 +1,20 @@
 # Cloudflare DDNS Manager
 
-一个适用于 Linux 服务器的 Cloudflare DDNS 脚本，提供交互式菜单、systemd 定时任务、Cloudflare A 记录自动更新，以及可选的 Telegram 变更通知。
+一个适用于 Linux 服务器的 Cloudflare DDNS 脚本，提供交互式菜单、systemd 定时任务、Cloudflare A/AAAA 记录自动更新（支持多条记录），以及可选的 Telegram 变更通知。
 
 ## 功能
 
-- 自动获取当前公网 IPv4
-- 自动创建或更新 Cloudflare DNS A 记录
+- 自动获取当前公网 IP，支持 IPv4（A）与 IPv6（AAAA）
+- 多个公网 IP 数据源容错（任一可用即可）
+- 自动创建或更新 Cloudflare DNS 记录，支持一次更新多条记录
 - IP 未变化时不重复更新
 - 支持 Cloudflare proxied 小云朵开关
 - 支持 systemd timer 定时运行
 - 支持 Telegram 在记录创建或 IP 变化更新成功后推送通知
 - 支持配置 Boil IP 面板专属换 IP API
-- 支持 Telegram Bot 带图交互式按钮面板，一键换 IP、运行 DDNS、查看状态
+- 支持 Telegram Bot 带图交互式按钮面板：换 IP、运行 DDNS、刷新状态、查看日志、一键启停定时器，并实时显示「公网 IP ↔ DNS 记录」同步状态
+- 交互菜单带实时状态条、配置后即时验证 Cloudflare、一键卸载与在线更新
+- 日志自动轮转，避免无限增长
 - 配置文件使用 600 权限保存，避免密钥被普通用户读取
 
 ## 环境要求
@@ -73,7 +76,7 @@ sudo ddns
 
 菜单包含：
 
-1. 初始化或修改 Cloudflare 与 Telegram 配置
+1. 初始化或修改 Cloudflare 与 Telegram 配置（保存后即时验证 Token/Zone/记录）
 2. 立即运行一次 DDNS 检测
 3. 安装或更新 systemd 定时器
 4. 查看状态与日志
@@ -82,6 +85,9 @@ sudo ddns
 7. 立即调用换 IP API，并更新 DDNS
 8. 安装或更新 Telegram Bot 命令服务
 9. 停用 Telegram Bot 命令服务
+- l. 实时跟随日志
+- u. 在线更新到最新版本
+- x. 彻底卸载并清理（systemd 单元、配置、软链、日志）
 
 首次使用建议按这个顺序操作：
 
@@ -111,7 +117,8 @@ sudo ddns
 ```bash
 CF_API_TOKEN='your_cloudflare_api_token'
 ZONE_NAME='example.com'
-RECORD_NAME='ddns.example.com'
+RECORD_NAME='ddns.example.com'        # 多条记录用逗号或空格分隔：'a.example.com b.example.com'
+RECORD_TYPE='A'                       # A=IPv4，AAAA=IPv6
 TTL='120'
 PROXY='false'
 
@@ -226,11 +233,15 @@ Telegram 只会在 DNS 记录创建或 IP 变化更新成功后推送。安装 B
 面板按钮：
 
 ```text
-🔁 换 IP      调用 Boil 换 IP API，然后自动更新 Cloudflare DDNS
-📡 更新 DDNS  只立即运行一次 DDNS 检测
-📊 状态       查看当前公网 IP、记录名、timer 和 Bot 服务状态
-ℹ️ 帮助       查看可用命令
+🔁 换 IP        调用 Boil 换 IP API，然后自动更新 Cloudflare DDNS
+📡 更新 DDNS    只立即运行一次 DDNS 检测
+🔄 刷新         刷新面板状态（公网 IP ↔ DNS 记录同步情况）
+📜 日志         拉取最近 15 行运行日志
+▶️/⏸️ 定时器   一键启用或停用 systemd 定时器
+ℹ️ 帮助         查看可用命令
 ```
+
+面板会逐条显示每个记录的同步状态：`✅` 已同步、`⚠️` 待更新、`❔` 未知。
 
 可用命令：
 
@@ -239,7 +250,8 @@ Telegram 只会在 DNS 记录创建或 IP 变化更新成功后推送。安装 B
 /panel - 打开按钮控制面板
 /changeip - 调用换 IP API，然后自动更新 Cloudflare DDNS
 /ddns - 只立即运行一次 DDNS 检测
-/status - 查看当前公网 IP 和服务状态
+/status - 刷新当前公网 IP 和服务状态
+/log - 查看最近 15 行运行日志
 /help - 查看帮助
 ```
 
@@ -256,6 +268,8 @@ systemctl status cf-ddns-bot.service --no-pager
 ```
 
 ## 卸载
+
+最简单的方式是在 `sudo ddns` 菜单中选择 `x) 彻底卸载并清理`。也可以手动执行：
 
 ```bash
 sudo systemctl disable --now cf-ddns.timer 2>/dev/null || true

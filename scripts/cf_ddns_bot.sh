@@ -7,8 +7,24 @@ WORKER="$BASE_DIR/cf_ddns.sh"
 CHANGER="$BASE_DIR/cf_change_ip.sh"
 LOG_FILE="/var/log/cf_ddns.log"
 BOT_LOCK_FILE="/run/cf-ddns-bot-command.lock"
+HEADER_CACHE_FILE="/run/cf-ddns-bot-header.cache"
+HEADER_CACHE_TTL=10
 PANEL_IMAGE_FILE="${PANEL_IMAGE_FILE:-}"
 MIN_PANEL_IMAGE_BYTES=1000
+CF_API_BASE="https://api.cloudflare.com/client/v4"
+TIMER_UNIT_FILE="/etc/systemd/system/cf-ddns.timer"
+
+# 公网 IP 数据源（多源容错）。
+PUBLIC_IP4_SOURCES=(
+  "https://api.ipify.org"
+  "https://ipv4.icanhazip.com"
+  "https://ifconfig.me/ip"
+)
+PUBLIC_IP6_SOURCES=(
+  "https://api6.ipify.org"
+  "https://ipv6.icanhazip.com"
+  "https://ifconfig.co/ip"
+)
 
 log() {
   local message="$1"
@@ -29,9 +45,51 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少依赖：$1"
 }
 
+html_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  printf '%s' "$s"
+}
+
+is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+is_ipv6() { [[ "$1" == *:* && "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
+
+split_records() {
+  local raw="$1"
+  raw="${raw//,/ }"
+  printf '%s\n' $raw
+}
+
+get_public_ip() {
+  local record_type="${1:-A}"
+  local sources=() proto ip src
+
+  if [[ "$record_type" == "AAAA" ]]; then
+    sources=("${PUBLIC_IP6_SOURCES[@]}")
+    proto="-6"
+  else
+    sources=("${PUBLIC_IP4_SOURCES[@]}")
+    proto="-4"
+  fi
+
+  for src in "${sources[@]}"; do
+    ip="$(curl -fsS "$proto" --retry 1 --connect-timeout 5 --max-time 10 "$src" 2>/dev/null | tr -d '[:space:]')" || true
+    if [[ "$record_type" == "AAAA" ]]; then
+      is_ipv6 "$ip" && { printf '%s\n' "$ip"; return 0; }
+    else
+      is_ipv4 "$ip" && { printf '%s\n' "$ip"; return 0; }
+    fi
+  done
+
+  printf '未知\n'
+  return 1
+}
+
 is_valid_panel_image() {
   local image_file="$1"
-  local byte_count magic
+  local byte_count magic trailer
 
   [[ -f "$image_file" ]] || return 1
   byte_count="$(wc -c < "$image_file" 2>/dev/null | tr -d ' ')"
@@ -83,6 +141,16 @@ send_message() {
     >/dev/null || log "Telegram 消息发送失败。"
 }
 
+send_html_message() {
+  local chat_id="$1"
+  local html="$2"
+  tg_api sendMessage \
+    --data-urlencode "chat_id=${chat_id}" \
+    --data-urlencode "text=${html}" \
+    --data-urlencode "parse_mode=HTML" \
+    >/dev/null || log "Telegram HTML 消息发送失败。"
+}
+
 send_json() {
   local method="$1"
   local payload="$2"
@@ -91,6 +159,38 @@ send_json() {
     -H "Content-Type: application/json" \
     --data "$payload" \
     >/dev/null || log "Telegram ${method} 请求失败。"
+}
+
+# ===== Cloudflare 只读查询（用于面板展示同步状态）=====
+cf_api() {
+  local method="$1"
+  local endpoint="$2"
+  curl -fsS --retry 1 --connect-timeout 6 --max-time 15 \
+    -X "$method" "$CF_API_BASE$endpoint" \
+    -H "Authorization: Bearer ${CF_API_TOKEN:-}" \
+    -H "Content-Type: application/json"
+}
+
+cf_zone_id() {
+  [[ -n "${CF_API_TOKEN:-}" && -n "${ZONE_NAME:-}" ]] || return 1
+  local q resp
+  q="$(jq -rn --arg v "$ZONE_NAME" '$v|@uri')"
+  resp="$(cf_api GET "/zones?name=${q}&status=active" 2>/dev/null)" || return 1
+  jq -er '.result[0].id // empty' <<<"$resp" 2>/dev/null
+}
+
+cf_get_record_ip() {
+  local zone_id="$1" name="$2" type="$3" q resp
+  q="$(jq -rn --arg v "$name" '$v|@uri')"
+  resp="$(cf_api GET "/zones/${zone_id}/dns_records?type=${type}&name=${q}" 2>/dev/null)" || return 1
+  jq -er '.result[0].content // empty' <<<"$resp" 2>/dev/null
+}
+
+timer_interval() {
+  [[ -f "$TIMER_UNIT_FILE" ]] || { printf '未知'; return; }
+  local v
+  v="$(sed -n 's/^OnUnitActiveSec=//p' "$TIMER_UNIT_FILE" 2>/dev/null | head -n1)"
+  printf '%s' "${v:-未知}"
 }
 
 resolve_panel_image_file() {
@@ -131,6 +231,7 @@ send_photo_response() {
     --form-string "chat_id=${chat_id}" \
     -F "photo=@${image_file};filename=${image_name};type=${image_mime}" \
     --form-string "caption=${caption}" \
+    --form-string "parse_mode=HTML" \
     --form-string "reply_markup=${reply_markup}" 2>&1)" || curl_status=$?
 
   response="$(cat "$tmp_body" 2>/dev/null || true)"
@@ -163,7 +264,7 @@ send_panel_text_response() {
     --arg chat_id "$chat_id" \
     --arg text "$caption" \
     --argjson reply_markup "$(panel_markup)" \
-    '{chat_id:$chat_id,text:$text,reply_markup:$reply_markup}')"
+    '{chat_id:$chat_id,text:$text,parse_mode:"HTML",reply_markup:$reply_markup}')"
   tg_api sendMessage \
     -H "Content-Type: application/json" \
     --data "$payload"
@@ -197,7 +298,8 @@ configure_bot_commands() {
       {command:"panel", description:"打开控制面板"},
       {command:"changeip", description:"换 IP 并更新 DDNS"},
       {command:"ddns", description:"立即运行 DDNS"},
-      {command:"status", description:"查看状态"},
+      {command:"status", description:"刷新状态"},
+      {command:"log", description:"查看最近日志"},
       {command:"help", description:"帮助"}
     ]
   }')"
@@ -206,39 +308,118 @@ configure_bot_commands() {
 }
 
 panel_markup() {
-  jq -cn '{
-    inline_keyboard: [
-      [
-        {text:"🔁 换 IP", callback_data:"changeip"},
-        {text:"📡 更新 DDNS", callback_data:"ddns"}
-      ],
-      [
-        {text:"📊 状态", callback_data:"status"},
-        {text:"ℹ️ 帮助", callback_data:"help"}
+  local timer_state toggle_text toggle_data
+  timer_state="$(systemctl is-active cf-ddns.timer 2>/dev/null || true)"
+  if [[ "$timer_state" == "active" ]]; then
+    toggle_text="⏸️ 停用定时器"
+    toggle_data="timer_off"
+  else
+    toggle_text="▶️ 启用定时器"
+    toggle_data="timer_on"
+  fi
+
+  jq -cn \
+    --arg toggle_text "$toggle_text" \
+    --arg toggle_data "$toggle_data" \
+    '{
+      inline_keyboard: [
+        [
+          {text:"🔁 换 IP", callback_data:"changeip"},
+          {text:"📡 更新 DDNS", callback_data:"ddns"}
+        ],
+        [
+          {text:"🔄 刷新", callback_data:"refresh"},
+          {text:"📜 日志", callback_data:"log"}
+        ],
+        [
+          {text:$toggle_text, callback_data:$toggle_data},
+          {text:"ℹ️ 帮助", callback_data:"help"}
+        ]
       ]
-    ]
-  }'
+    }'
+}
+
+# 渲染各记录的同步状态块（公网 IP ↔ Cloudflare 记录值）。
+render_records_block() {
+  local zone_id="$1" record_type="$2" public_ip="$3"
+  local -a recs=()
+  local _r
+  while IFS= read -r _r; do
+    [[ -n "$_r" ]] && recs+=("$_r")
+  done < <(split_records "${RECORD_NAME:-}")
+
+  [[ "${#recs[@]}" -gt 0 ]] || return 0
+
+  local out="" name content mark shown=0 total="${#recs[@]}"
+  for name in "${recs[@]}"; do
+    [[ -n "$name" ]] || continue
+    shown=$((shown + 1))
+    if [[ "$shown" -gt 5 ]]; then
+      out+="… 其余 $((total - 5)) 条已省略"$'\n'
+      break
+    fi
+    content=""
+    [[ -n "$zone_id" ]] && content="$(cf_get_record_ip "$zone_id" "$name" "$record_type" 2>/dev/null || true)"
+    if [[ -z "$content" ]]; then
+      mark="❔"; content="未知"
+    elif [[ "$content" == "$public_ip" ]]; then
+      mark="✅"
+    else
+      mark="⚠️"
+    fi
+    out+="$(printf '🧭 %s → <code>%s</code> %s' "$(html_escape "$name")" "$(html_escape "$content")" "$mark")"$'\n'
+  done
+  printf '%s' "${out%$'\n'}"
+}
+
+build_panel_header() {
+  local record_type public_ip timer_state bot_state api_state interval zone_id records_block
+  record_type="${RECORD_TYPE:-A}"
+  public_ip="$(get_public_ip "$record_type")"   # 失败时本函数已输出「未知」
+  timer_state="$(systemctl is-active cf-ddns.timer 2>/dev/null || printf 'unknown')"
+  bot_state="$(systemctl is-active cf-ddns-bot.service 2>/dev/null || printf 'unknown')"
+  interval="$(timer_interval)"
+  api_state="未启用"
+  [[ "${IP_CHANGE_ENABLED:-false}" == "true" && -n "${IP_CHANGE_API_URL:-}" ]] && api_state="已启用"
+  zone_id="$(cf_zone_id 2>/dev/null || true)"
+  records_block="$(render_records_block "$zone_id" "$record_type" "$public_ip")"
+  [[ -n "$records_block" ]] || records_block="🧭 记录 | 未配置"
+
+  printf '🚀 <b>Cloudflare DDNS 控制面板</b>\n\n🌐 公网 IP（%s）| <code>%s</code>\n%s\n🔁 换 IP API | %s\n⏱️ 定时器 | %s（每 %s）\n🤖 Bot | %s\n🕒 刷新于 | %s' \
+    "$record_type" \
+    "$(html_escape "$public_ip")" \
+    "$records_block" \
+    "$api_state" \
+    "$timer_state" \
+    "$(html_escape "$interval")" \
+    "$bot_state" \
+    "$(date '+%H:%M:%S')"
 }
 
 panel_caption() {
   local note="${1:-面板就绪}"
-  local public_ip timer_state bot_state api_state updated_at
+  local force="${2:-}"
+  local header now mtime age
 
-  public_ip="$(curl -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null || printf '未知')"
-  timer_state="$(systemctl is-active cf-ddns.timer 2>/dev/null || true)"
-  bot_state="$(systemctl is-active cf-ddns-bot.service 2>/dev/null || true)"
-  api_state="未启用"
-  [[ "${IP_CHANGE_ENABLED:-false}" == "true" && -n "${IP_CHANGE_API_URL:-}" ]] && api_state="已启用"
-  updated_at="$(date '+%H:%M:%S')"
+  now="$(date +%s)"
+  if [[ "$force" != "force" && -f "$HEADER_CACHE_FILE" ]]; then
+    mtime="$(stat -c %Y "$HEADER_CACHE_FILE" 2>/dev/null || printf '0')"
+    age=$((now - mtime))
+    if [[ "$age" -ge 0 && "$age" -lt "$HEADER_CACHE_TTL" ]]; then
+      header="$(cat "$HEADER_CACHE_FILE" 2>/dev/null || true)"
+    fi
+  fi
 
-  printf '🚀 Cloudflare DDNS 控制面板\n\n🌐 当前公网 IP | %s\n🧭 DNS 记录 | %s\n🔁 换 IP API | %s\n⏱️ DDNS 定时器 | %s\n🤖 Bot 服务 | %s\n🕒 更新时间 | %s\n\n📌 当前操作 | %s\n\n请选择下方按钮操作：' \
-    "$public_ip" \
-    "${RECORD_NAME:-未配置}" \
-    "$api_state" \
-    "${timer_state:-unknown}" \
-    "${bot_state:-unknown}" \
-    "$updated_at" \
-    "$note"
+  if [[ -z "${header:-}" ]]; then
+    header="$(build_panel_header)"
+    printf '%s' "$header" > "$HEADER_CACHE_FILE" 2>/dev/null || true
+  fi
+
+  printf '%s\n\n📌 当前操作 | %s\n\n请选择下方按钮操作：' "$header" "$(html_escape "$note")"
+}
+
+invalidate_header_cache() {
+  rm -f "$HEADER_CACHE_FILE" 2>/dev/null || true
 }
 
 send_panel_response() {
@@ -305,7 +486,7 @@ edit_panel() {
       --argjson message_id "$message_id" \
       --arg caption "$caption" \
       --argjson reply_markup "$(panel_markup)" \
-      '{chat_id:$chat_id,message_id:$message_id,caption:$caption,reply_markup:$reply_markup}')"
+      '{chat_id:$chat_id,message_id:$message_id,caption:$caption,parse_mode:"HTML",reply_markup:$reply_markup}')"
     send_json editMessageCaption "$payload"
   else
     payload="$(jq -n \
@@ -313,7 +494,7 @@ edit_panel() {
       --argjson message_id "$message_id" \
       --arg text "$caption" \
       --argjson reply_markup "$(panel_markup)" \
-      '{chat_id:$chat_id,message_id:$message_id,text:$text,reply_markup:$reply_markup}')"
+      '{chat_id:$chat_id,message_id:$message_id,text:$text,parse_mode:"HTML",reply_markup:$reply_markup}')"
     send_json editMessageText "$payload"
   fi
 }
@@ -349,9 +530,11 @@ handle_changeip_panel() {
     [[ "$wait_seconds" =~ ^[0-9]+$ ]] || wait_seconds="8"
     edit_panel "$chat_id" "$message_id" "$message_kind" "换 IP API 已完成，等待 ${wait_seconds} 秒后更新 DDNS..."
     sleep "$wait_seconds"
+    invalidate_header_cache
     edit_panel "$chat_id" "$message_id" "$message_kind" "正在更新 Cloudflare DDNS..."
     if output="$(bash "$WORKER" 2>&1)"; then
       log "Telegram 换 IP 后 DDNS 输出：$output"
+      invalidate_header_cache
       edit_panel "$chat_id" "$message_id" "$message_kind" "换 IP 与 DDNS 更新完成。"
     else
       log "Telegram 换 IP 后 DDNS 失败：$output"
@@ -378,6 +561,7 @@ handle_ddns_panel() {
   edit_panel "$chat_id" "$message_id" "$message_kind" "正在立即运行 DDNS 检测..."
   if output="$(bash "$WORKER" 2>&1)"; then
     log "Telegram 手动 DDNS 输出：$output"
+    invalidate_header_cache
     edit_panel "$chat_id" "$message_id" "$message_kind" "DDNS 检测完成。"
   else
     log "Telegram 手动 DDNS 失败：$output"
@@ -385,12 +569,50 @@ handle_ddns_panel() {
   fi
 }
 
-handle_status_panel() {
+handle_refresh_panel() {
   local chat_id="$1"
   local message_id="$2"
   local message_kind="$3"
 
+  invalidate_header_cache
   edit_panel "$chat_id" "$message_id" "$message_kind" "状态已刷新。"
+}
+
+handle_timer_toggle() {
+  local chat_id="$1"
+  local message_id="$2"
+  local message_kind="$3"
+  local action="$4"
+  local note
+
+  if [[ "$action" == "on" ]]; then
+    if systemctl enable --now cf-ddns.timer >/dev/null 2>&1; then
+      note="定时器已启用。"
+    else
+      note="启用定时器失败（需要 root 权限）。"
+    fi
+  else
+    if systemctl disable --now cf-ddns.timer >/dev/null 2>&1; then
+      note="定时器已停用。"
+    else
+      note="停用定时器失败（需要 root 权限）。"
+    fi
+  fi
+
+  invalidate_header_cache
+  edit_panel "$chat_id" "$message_id" "$message_kind" "$note"
+}
+
+handle_log() {
+  local chat_id="$1"
+  local lines
+
+  if [[ -f "$LOG_FILE" ]]; then
+    lines="$(tail -n 15 "$LOG_FILE" 2>/dev/null || true)"
+  fi
+  [[ -n "${lines:-}" ]] || lines="暂无日志。"
+
+  send_html_message "$chat_id" "$(printf '📜 <b>最近日志（15 行）</b>\n<pre>%s</pre>' "$(html_escape "$lines")")"
 }
 
 handle_help_panel() {
@@ -398,7 +620,8 @@ handle_help_panel() {
   local message_id="$2"
   local message_kind="$3"
 
-  edit_panel "$chat_id" "$message_id" "$message_kind" "按钮说明：换 IP 会调用 API 并更新 DDNS；更新 DDNS 只检测 DNS；状态会刷新面板。"
+  edit_panel "$chat_id" "$message_id" "$message_kind" \
+    "换 IP=调用 API 并更新 DDNS；更新 DDNS=只检测 DNS；刷新=更新状态；日志=最近 15 行；定时器=启用/停用自动检测。"
 }
 
 handle_changeip_command() {
@@ -459,9 +682,21 @@ handle_callback_update() {
       answer_callback_query "$callback_id" "正在更新 DDNS"
       handle_ddns_panel "$chat_id" "$message_id" "$message_kind"
       ;;
-    status)
+    refresh|status)
       answer_callback_query "$callback_id" "状态已刷新"
-      handle_status_panel "$chat_id" "$message_id" "$message_kind"
+      handle_refresh_panel "$chat_id" "$message_id" "$message_kind"
+      ;;
+    log)
+      answer_callback_query "$callback_id" "正在拉取日志"
+      handle_log "$chat_id"
+      ;;
+    timer_on)
+      answer_callback_query "$callback_id" "正在启用定时器"
+      handle_timer_toggle "$chat_id" "$message_id" "$message_kind" "on"
+      ;;
+    timer_off)
+      answer_callback_query "$callback_id" "正在停用定时器"
+      handle_timer_toggle "$chat_id" "$message_id" "$message_kind" "off"
       ;;
     help)
       answer_callback_query "$callback_id" "帮助"
@@ -469,7 +704,7 @@ handle_callback_update() {
       ;;
     panel)
       answer_callback_query "$callback_id" "已刷新"
-      edit_panel "$chat_id" "$message_id" "$message_kind" "面板已刷新。"
+      handle_refresh_panel "$chat_id" "$message_id" "$message_kind"
       ;;
     *) send_message "$chat_id" "未知按钮。发送 /panel 重新打开控制面板。" ;;
   esac
@@ -498,12 +733,14 @@ handle_update() {
     /start|/panel) send_panel "$chat_id" ;;
     /changeip) handle_changeip_command "$chat_id" ;;
     /ddns) handle_ddns_command "$chat_id" ;;
-    /status) send_panel "$chat_id" "状态已刷新。" ;;
-    /help) send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、状态、帮助都在面板内刷新。" ;;
+    /status) invalidate_header_cache; send_panel "$chat_id" "状态已刷新。" ;;
+    /log) handle_log "$chat_id" ;;
+    /help) send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、刷新、日志、定时器开关都在面板内。" ;;
     "🔁 换 IP") handle_changeip_command "$chat_id" ;;
     "📡 更新 DDNS") handle_ddns_command "$chat_id" ;;
-    "📊 状态") send_panel "$chat_id" "状态已刷新。" ;;
-    "ℹ️ 帮助") send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、状态、帮助都在面板内刷新。" ;;
+    "🔄 刷新") invalidate_header_cache; send_panel "$chat_id" "状态已刷新。" ;;
+    "📜 日志") handle_log "$chat_id" ;;
+    "ℹ️ 帮助") send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、刷新、日志、定时器开关都在面板内。" ;;
     *) send_message "$chat_id" "未知命令。发送 /panel 打开控制面板。" ;;
   esac
 }
@@ -519,6 +756,7 @@ main() {
 
   if [[ "${1:-}" == "--send-panel" ]]; then
     shift
+    invalidate_header_cache
     send_panel "$TG_CHAT_ID" "${*:-面板就绪}"
     exit 0
   fi
