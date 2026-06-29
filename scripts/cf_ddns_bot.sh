@@ -82,7 +82,16 @@ send_photo_response() {
   local caption="$2"
   local reply_markup="$3"
   local image_file="$4"
-  local tmp_body http_status curl_status response
+  local tmp_body http_status curl_status response image_mime image_name
+
+  image_mime="image/png"
+  image_name="panel_illustration.png"
+  case "$image_file" in
+    *.jpg|*.jpeg)
+      image_mime="image/jpeg"
+      image_name="panel_illustration.jpg"
+      ;;
+  esac
 
   tmp_body="$(mktemp)"
   curl_status=0
@@ -91,7 +100,7 @@ send_photo_response() {
     -o "$tmp_body" \
     -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" \
     --form-string "chat_id=${chat_id}" \
-    -F "photo=@${image_file}" \
+    -F "photo=@${image_file};filename=${image_name};type=${image_mime}" \
     --form-string "caption=${caption}" \
     --form-string "reply_markup=${reply_markup}" 2>&1)" || curl_status=$?
 
