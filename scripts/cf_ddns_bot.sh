@@ -128,7 +128,9 @@ load_config() {
 tg_api() {
   local method="$1"
   shift
-  curl -fsS --retry 2 --connect-timeout 10 --max-time 60 \
+  # --retry-connrefused：让 --retry 也覆盖连接被拒/连接超时这类瞬时网络错误。
+  curl -fsS --retry 2 --retry-delay 2 --retry-connrefused \
+    --connect-timeout 10 --max-time 60 \
     "https://api.telegram.org/bot${TG_BOT_TOKEN}/${method}" "$@"
 }
 
@@ -821,14 +823,28 @@ main() {
   local offset="0"
   [[ -f "$offset_file" ]] && offset="$(<"$offset_file")"
 
+  # 网络抖动时静默退避重试，避免日志被「getUpdates 失败」刷屏：
+  # 仅在首次失败时记一条，之后静默；恢复后再记一条。退避 5→10→20→40→60 秒封顶。
+  local fail_count=0 backoff=5
   while true; do
     load_config
 
     local response update_ids update_id update
     if ! response="$(tg_api getUpdates --get --data-urlencode "timeout=25" --data-urlencode "offset=${offset}")"; then
-      log "Telegram getUpdates 失败，5 秒后重试。"
-      sleep 5
+      fail_count=$((fail_count + 1))
+      if [[ "$fail_count" -eq 1 ]]; then
+        log "Telegram getUpdates 连接失败，正在自动重试（后续静默，恢复后提示）。"
+      fi
+      sleep "$backoff"
+      backoff=$((backoff * 2))
+      [[ "$backoff" -gt 60 ]] && backoff=60
       continue
+    fi
+
+    if [[ "$fail_count" -gt 0 ]]; then
+      log "Telegram getUpdates 已恢复（累计失败 ${fail_count} 次）。"
+      fail_count=0
+      backoff=5
     fi
 
     while IFS= read -r update; do
