@@ -387,16 +387,8 @@ configure_env() {
   if [[ "$TG_ENABLED" == "true" ]]; then
     prompt_secret_keep TG_BOT_TOKEN "请输入 Telegram Bot Token"
     prompt_sensitive_text_keep TG_CHAT_ID "请输入 Telegram Chat ID（主用户）" "123456789"
-
-    local _extra=""
-    read -r -p "额外授权 Chat ID（多人共用，逗号/空格分隔，回车保留当前）[当前：${TG_EXTRA_CHAT_IDS:-无}]: " _extra || true
-    case "${_extra,,}" in
-      "") : ;;                       # 回车：保留当前值
-      none|clear|-) TG_EXTRA_CHAT_IDS="" ;;   # 显式清空
-      *) TG_EXTRA_CHAT_IDS="$_extra" ;;
-    esac
-
     prompt_bool_keep GEO_ENABLED "是否在面板显示 IP 地区/ISP 归属？（会向第三方查询本机公网 IP）" "${GEO_ENABLED:-true}"
+    echo "（多人共用：主菜单 c) 管理授权用户，或在 Telegram 用 /adduser、/deluser 快速增删。）"
   else
     TG_BOT_TOKEN=""
     TG_CHAT_ID=""
@@ -548,6 +540,113 @@ test_telegram() {
     echo "Telegram 测试推送失败，请检查 Bot Token、Chat ID、机器人对话或群组权限。"
     return 1
   fi
+}
+
+# 规范化 Chat ID 列表：逗号转空格、去空白、去重，输出空格分隔字符串。
+normalize_chat_ids() {
+  local raw="$1" id seen=" " out=""
+  raw="${raw//,/ }"
+  for id in $raw; do
+    [[ -n "$id" ]] || continue
+    [[ "$seen" == *" $id "* ]] && continue
+    seen+="$id "
+    out+="${out:+ }$id"
+  done
+  printf '%s' "$out"
+}
+
+# 管理授权用户（多人共用）：列出 / 添加 / 删除额外 Chat ID。主用户不可在此删除。
+manage_chat_ids() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo "尚未配置，请先选择 1 初始化/修改配置。"
+    pause
+    return 1
+  fi
+
+  load_env
+
+  local op newid sel target i found e
+  local -a extras=()
+
+  while true; do
+    clear 2>/dev/null || true
+    echo "${C_BOLD}${C_CYAN}=== 管理授权用户（Telegram Chat ID）===${C_RESET}"
+    if [[ "${TG_ENABLED:-false}" != "true" ]]; then
+      echo "${C_YELLOW}注意：Telegram 未启用，改动会保存但暂不生效。${C_RESET}"
+    fi
+    echo
+    echo "主用户（不可删除）：${C_CYAN}${TG_CHAT_ID:-未设置}${C_RESET}"
+    echo "额外授权用户："
+
+    extras=()
+    for e in $(normalize_chat_ids "${TG_EXTRA_CHAT_IDS:-}"); do
+      [[ "$e" == "${TG_CHAT_ID:-}" ]] && continue
+      extras+=("$e")
+    done
+
+    if [[ "${#extras[@]}" -eq 0 ]]; then
+      echo "  ${C_DIM}（无）${C_RESET}"
+    else
+      for i in "${!extras[@]}"; do
+        printf '  %d) %s\n' "$((i + 1))" "${extras[$i]}"
+      done
+    fi
+
+    echo
+    echo "  ${C_BOLD}a)${C_RESET} 添加   ${C_BOLD}d)${C_RESET} 删除   ${C_BOLD}0)${C_RESET} 返回"
+    read -r -p "请选择: " op || true
+
+    case "${op,,}" in
+      a)
+        read -r -p "输入要添加的 Chat ID（个人为正整数，群组可为负，回车取消）: " newid || true
+        newid="${newid//[[:space:]]/}"
+        [[ -n "$newid" ]] || { continue; }
+        if ! [[ "$newid" =~ ^-?[0-9]+$ ]]; then
+          echo "无效 Chat ID（应为整数）。"; sleep 1; continue
+        fi
+        if [[ "$newid" == "${TG_CHAT_ID:-}" ]]; then
+          echo "该 ID 已是主用户，无需添加。"; sleep 1; continue
+        fi
+        if [[ " ${extras[*]} " == *" $newid "* ]]; then
+          echo "该用户已在列表中：$newid"; sleep 1; continue
+        fi
+        TG_EXTRA_CHAT_IDS="$(normalize_chat_ids "${TG_EXTRA_CHAT_IDS:-} $newid")"
+        save_env >/dev/null
+        echo "${C_GREEN}已添加并保存：$newid${C_RESET}"; sleep 1
+        ;;
+      d)
+        if [[ "${#extras[@]}" -eq 0 ]]; then
+          echo "没有可删除的额外用户。"; sleep 1; continue
+        fi
+        read -r -p "输入要删除的序号或 Chat ID（回车取消）: " sel || true
+        sel="${sel//[[:space:]]/}"
+        [[ -n "$sel" ]] || { continue; }
+        if [[ "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le "${#extras[@]}" ]]; then
+          target="${extras[$((sel - 1))]}"
+        else
+          target="$sel"
+        fi
+        found=0
+        local rebuilt=""
+        for e in "${extras[@]}"; do
+          if [[ "$e" == "$target" ]]; then found=1; continue; fi
+          rebuilt+="${rebuilt:+ }$e"
+        done
+        if [[ "$found" -eq 0 ]]; then
+          echo "未找到该用户：$target"; sleep 1; continue
+        fi
+        TG_EXTRA_CHAT_IDS="$rebuilt"
+        save_env >/dev/null
+        echo "${C_GREEN}已删除并保存：$target${C_RESET}"; sleep 1
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        echo "无效选择。"; sleep 1
+        ;;
+    esac
+  done
 }
 
 # 校验图片：类型(png/jpg) + 字节范围 + 魔数 + 结尾标记（截断图会让 Telegram 报错）。
@@ -799,6 +898,7 @@ print_menu() {
   echo "  ${C_BOLD}7)${C_RESET} 立即调用换 IP API 并更新 DDNS"
   echo "  ${C_BOLD}8)${C_RESET} 安装/更新 Telegram Bot 命令服务"
   echo "  ${C_BOLD}9)${C_RESET} 停用 Telegram Bot 命令服务"
+  echo "  ${C_BOLD}c)${C_RESET} 管理授权用户（多人共用 Chat ID）"
   echo "  ${C_BOLD}i)${C_RESET} 更换 Telegram 面板图片"
   echo "  ${C_BOLD}l)${C_RESET} 实时跟随日志"
   echo "  ${C_BOLD}u)${C_RESET} 更新到最新版本"
@@ -826,6 +926,7 @@ main() {
       7) change_ip_once; pause ;;
       8) install_bot_service; pause ;;
       9) disable_bot_service; pause ;;
+      c|C) manage_chat_ids ;;
       i|I) set_panel_image; pause ;;
       l|L) follow_log; pause ;;
       u|U) update_self; pause ;;

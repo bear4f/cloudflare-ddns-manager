@@ -78,6 +78,44 @@ is_authorized_chat() {
   return 1
 }
 
+# 当前额外授权 ID（排除主用户、去重、空格分隔）。
+extra_ids_string() {
+  local raw="${TG_EXTRA_CHAT_IDS:-}" id seen=" " out=""
+  raw="${raw//,/ }"
+  for id in $raw; do
+    [[ -n "$id" ]] || continue
+    [[ "$id" == "${TG_CHAT_ID:-}" ]] && continue
+    [[ "$seen" == *" $id "* ]] && continue
+    seen+="$id "
+    out+="${out:+ }$id"
+  done
+  printf '%s' "$out"
+}
+
+# 把额外授权 ID 写回 cf_ddns.env（单引号包裹，列表只含整数与空格，安全）。
+# 仅重写 TG_EXTRA_CHAT_IDS 行，其余内容原样保留；运行中的 Bot 下一轮 load_config
+# 会重新 source 生效，无需重启。
+persist_extra_chat_ids() {
+  local new_value="$1" tmp line replaced=0
+  tmp="$(mktemp)" || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == TG_EXTRA_CHAT_IDS=* ]]; then
+      printf "TG_EXTRA_CHAT_IDS='%s'\n" "$new_value" >> "$tmp"
+      replaced=1
+    else
+      printf '%s\n' "$line" >> "$tmp"
+    fi
+  done < "$ENV_FILE"
+  [[ "$replaced" -eq 1 ]] || printf "TG_EXTRA_CHAT_IDS='%s'\n" "$new_value" >> "$tmp"
+  if install -m 600 "$tmp" "$ENV_FILE"; then
+    rm -f "$tmp"
+    TG_EXTRA_CHAT_IDS="$new_value"   # 立即生效（本进程内）
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 split_records() {
   local raw="$1"
   raw="${raw//,/ }"
@@ -336,6 +374,9 @@ configure_bot_commands() {
       {command:"ddns", description:"立即运行 DDNS"},
       {command:"status", description:"刷新状态"},
       {command:"log", description:"查看最近日志"},
+      {command:"users", description:"查看授权用户"},
+      {command:"adduser", description:"添加授权用户（仅主用户）"},
+      {command:"deluser", description:"删除授权用户（仅主用户）"},
       {command:"help", description:"帮助"}
     ]
   }')"
@@ -370,6 +411,9 @@ panel_markup() {
         [
           {text:$toggle_text, callback_data:$toggle_data},
           {text:"ℹ️ 帮助", callback_data:"help"}
+        ],
+        [
+          {text:"👥 用户", callback_data:"users"}
         ]
       ]
     }'
@@ -698,7 +742,78 @@ handle_help_panel() {
   local message_kind="$3"
 
   edit_panel "$chat_id" "$message_id" "$message_kind" \
-    "换 IP=调用 API 并更新 DDNS；更新 DDNS=只检测 DNS；刷新=更新状态；日志=最近 15 行；定时器=启用/停用自动检测。"
+    "换 IP=调用 API 并更新 DDNS；更新 DDNS=只检测 DNS；刷新=更新状态；日志=最近 15 行；定时器=启用/停用自动检测；用户=查看授权用户（/adduser、/deluser 增删）。"
+}
+
+handle_users_command() {
+  local chat_id="$1"
+  local extras
+  extras="$(extra_ids_string)"
+  [[ -n "$extras" ]] || extras="（无）"
+  send_html_message "$chat_id" "$(printf '👥 <b>授权用户</b>\n主用户：<code>%s</code>\n额外：<code>%s</code>\n\n添加：<code>/adduser &lt;chat_id&gt;</code>\n删除：<code>/deluser &lt;chat_id&gt;</code>\n（仅主用户可增删；新用户需先自己给本 Bot 发过一条消息）' \
+    "$(html_escape "${TG_CHAT_ID:-}")" "$(html_escape "$extras")")"
+}
+
+handle_adduser_command() {
+  local chat_id="$1" arg="$2"
+
+  if [[ "$chat_id" != "$TG_CHAT_ID" ]]; then
+    send_message "$chat_id" "仅主用户可管理授权用户。"
+    return 0
+  fi
+  arg="${arg//[[:space:]]/}"
+  if ! [[ "$arg" =~ ^-?[0-9]+$ ]]; then
+    send_message "$chat_id" "用法：/adduser <chat_id>（chat_id 为整数，群组可为负）。"
+    return 0
+  fi
+  if [[ "$arg" == "$TG_CHAT_ID" ]]; then
+    send_message "$chat_id" "该 ID 已是主用户，无需添加。"
+    return 0
+  fi
+
+  local current="$(extra_ids_string)"
+  if [[ " $current " == *" $arg "* ]]; then
+    send_message "$chat_id" "该用户已在授权列表中：$arg"
+    return 0
+  fi
+
+  if persist_extra_chat_ids "${current:+$current }$arg"; then
+    log "已添加授权用户：$arg"
+    send_message "$chat_id" "✅ 已添加授权用户：$arg"
+  else
+    send_message "$chat_id" "保存失败，请检查服务器配置文件权限。"
+  fi
+}
+
+handle_deluser_command() {
+  local chat_id="$1" arg="$2"
+
+  if [[ "$chat_id" != "$TG_CHAT_ID" ]]; then
+    send_message "$chat_id" "仅主用户可管理授权用户。"
+    return 0
+  fi
+  arg="${arg//[[:space:]]/}"
+  if ! [[ "$arg" =~ ^-?[0-9]+$ ]]; then
+    send_message "$chat_id" "用法：/deluser <chat_id>。"
+    return 0
+  fi
+
+  local current="$(extra_ids_string)" rebuilt="" found=0 id
+  for id in $current; do
+    if [[ "$id" == "$arg" ]]; then found=1; continue; fi
+    rebuilt+="${rebuilt:+ }$id"
+  done
+  if [[ "$found" -eq 0 ]]; then
+    send_message "$chat_id" "该用户不在额外授权列表中：$arg"
+    return 0
+  fi
+
+  if persist_extra_chat_ids "$rebuilt"; then
+    log "已删除授权用户：$arg"
+    send_message "$chat_id" "✅ 已删除授权用户：$arg"
+  else
+    send_message "$chat_id" "保存失败，请检查服务器配置文件权限。"
+  fi
 }
 
 handle_changeip_command() {
@@ -767,6 +882,10 @@ handle_callback_update() {
       answer_callback_query "$callback_id" "正在拉取日志"
       handle_log "$chat_id"
       ;;
+    users)
+      answer_callback_query "$callback_id" "授权用户"
+      handle_users_command "$chat_id"
+      ;;
     timer_on)
       answer_callback_query "$callback_id" "正在启用定时器"
       handle_timer_toggle "$chat_id" "$message_id" "$message_kind" "on"
@@ -806,13 +925,22 @@ handle_update() {
   fi
 
   cmd="$(command_name "$text")"
+  # 取命令后的第一个参数（如 /adduser 123456 -> 123456）。
+  local arg=""
+  if [[ "$text" == *" "* ]]; then
+    arg="${text#* }"
+    arg="${arg%% *}"
+  fi
   case "$cmd" in
     /start|/panel) send_panel "$chat_id" ;;
     /changeip) handle_changeip_command "$chat_id" ;;
     /ddns) handle_ddns_command "$chat_id" ;;
     /status) invalidate_header_cache; send_panel "$chat_id" "状态已刷新。" ;;
     /log) handle_log "$chat_id" ;;
-    /help) send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、刷新、日志、定时器开关都在面板内。" ;;
+    /users) handle_users_command "$chat_id" ;;
+    /adduser) handle_adduser_command "$chat_id" "$arg" ;;
+    /deluser) handle_deluser_command "$chat_id" "$arg" ;;
+    /help) send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、刷新、日志、定时器、用户都在面板内；/adduser、/deluser 增删授权用户。" ;;
     "🔁 换 IP") handle_changeip_command "$chat_id" ;;
     "📡 更新 DDNS") handle_ddns_command "$chat_id" ;;
     "🔄 刷新") invalidate_header_cache; send_panel "$chat_id" "状态已刷新。" ;;
