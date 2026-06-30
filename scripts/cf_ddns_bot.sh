@@ -1094,6 +1094,8 @@ handle_callback_update() {
       ;;
     udel:*)
       local del_id="${data#udel:}" current rebuilt found=0 _id
+      # 先即时应答按钮，避免后续操作或网络抖动让按钮“无反应/转圈”。
+      answer_callback_query "$callback_id" "正在删除 $del_id"
       current="$(extra_ids_string)"
       for _id in $current; do
         if [[ "$_id" == "$del_id" ]]; then found=1; continue; fi
@@ -1101,10 +1103,10 @@ handle_callback_update() {
       done
       if [[ "$found" -eq 1 ]] && persist_extra_chat_ids "$rebuilt"; then
         log "已删除授权用户：$del_id"
-        answer_callback_query "$callback_id" "已删除 $del_id"
       else
-        answer_callback_query "$callback_id" "删除失败或不存在"
+        log "删除授权用户失败或不存在：$del_id"
       fi
+      # 重渲染用户管理子页：被删用户从列表消失即为确认。
       render_users_page "$chat_id" "$message_id" "$message_kind"
       ;;
     timer_on)
