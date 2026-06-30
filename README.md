@@ -165,7 +165,8 @@ IP_CHANGE_WAIT_SECONDS='8'
 
 TG_ENABLED='false'
 TG_BOT_TOKEN=''
-TG_CHAT_ID=''
+TG_CHAT_ID=''                         # 主用户 Chat ID
+TG_EXTRA_CHAT_IDS=''                  # 多人共用：额外授权 Chat ID，逗号/空格分隔，如 '123456789 987654321'
 
 GEO_ENABLED='true'                    # 面板显示 IP 地区/ISP 归属（会向第三方查询本机公网 IP）
 ```
@@ -296,9 +297,24 @@ systemctl status cf-ddns.service --no-pager
 
 操作进度会在同一条面板消息内动态刷新，详细记录仍写入服务器日志。**只有 IP 真正变化（或首次创建记录）时，自动 DDNS 才会推送新面板；IP 未变化的常规检测不打扰。** 若图片发送失败，会自动退回文字面板并在日志记录原因。
 
+### 多人共用同一个 Bot
+
+默认只有 `TG_CHAT_ID`（主用户）能操作。若想几个人一起用，在 `cf_ddns.env` 的 `TG_EXTRA_CHAT_IDS` 填上额外的 Chat ID（逗号或空格分隔），或在 `sudo ddns` → `1` 配置向导的「额外授权 Chat ID」一步填写：
+
+```bash
+TG_EXTRA_CHAT_IDS='123456789 987654321'
+```
+
+- 列表中的每个人都能操作 Bot（换 IP、更新 DDNS、启停定时器等），**与主用户同权限**；
+- IP 变化时的自动通知会**推送给所有授权 Chat ID**；
+- 其余未列入的 Chat ID 一律忽略；
+- 修改后执行 `sudo systemctl restart cf-ddns-bot.service` 使其生效。每个人需先各自给 Bot 发过一条消息，才能拿到自己的 Chat ID。
+
+> 配置向导里在「额外授权 Chat ID」一步：回车保留当前值，输入新值覆盖，输入 `none`/`clear`/`-` 清空。
+
 **安全限制**
 
-- Bot 只响应配置文件里的 `TG_CHAT_ID`，其余 Chat ID 一律忽略
+- Bot 只响应 `TG_CHAT_ID` 与 `TG_EXTRA_CHAT_IDS` 中列出的 Chat ID，其余一律忽略
 - 「换 IP」「更新 DDNS」同一时间只允许一个任务运行（flock），避免重复触发
 
 ---

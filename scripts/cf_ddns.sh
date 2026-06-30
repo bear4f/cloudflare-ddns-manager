@@ -60,6 +60,19 @@ cap_log_file() {
   fi
 }
 
+# 所有通知目标 Chat ID：主 ID + 额外 ID（TG_EXTRA_CHAT_IDS，逗号/空格分隔），去重。
+tg_chat_ids() {
+  local raw="${TG_CHAT_ID:-} ${TG_EXTRA_CHAT_IDS:-}"
+  raw="${raw//,/ }"
+  local id seen=" "
+  for id in $raw; do
+    [[ -n "$id" ]] || continue
+    [[ "$seen" == *" $id "* ]] && continue
+    seen+="$id "
+    printf '%s\n' "$id"
+  done
+}
+
 send_telegram() {
   local text="$1"
 
@@ -72,13 +85,17 @@ send_telegram() {
     return 0
   fi
 
-  if ! curl -fsS --retry 3 --connect-timeout 5 --max-time 20 \
-    -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${TG_CHAT_ID}" \
-    --data-urlencode "text=$text" \
-    >/dev/null; then
-    log "Telegram 推送失败。"
-  fi
+  local cid
+  while IFS= read -r cid; do
+    [[ -n "$cid" ]] || continue
+    if ! curl -fsS --retry 3 --connect-timeout 5 --max-time 20 \
+      -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+      --data-urlencode "chat_id=${cid}" \
+      --data-urlencode "text=$text" \
+      >/dev/null; then
+      log "Telegram 推送失败（${cid}）。"
+    fi
+  done < <(tg_chat_ids)
 }
 
 send_telegram_panel() {

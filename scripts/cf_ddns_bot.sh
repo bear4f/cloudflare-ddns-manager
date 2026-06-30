@@ -56,6 +56,28 @@ html_escape() {
 is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 is_ipv6() { [[ "$1" == *:* && "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
 
+# 所有授权/通知的 Chat ID：主 ID（TG_CHAT_ID）+ 额外 ID（TG_EXTRA_CHAT_IDS，
+# 逗号/空格分隔），去重后每行一个。用于多人共用同一个 Bot。
+allowed_chat_ids() {
+  local raw="${TG_CHAT_ID:-} ${TG_EXTRA_CHAT_IDS:-}"
+  raw="${raw//,/ }"
+  local id seen=" "
+  for id in $raw; do
+    [[ -n "$id" ]] || continue
+    [[ "$seen" == *" $id "* ]] && continue
+    seen+="$id "
+    printf '%s\n' "$id"
+  done
+}
+
+is_authorized_chat() {
+  local target="$1" id
+  while IFS= read -r id; do
+    [[ "$id" == "$target" ]] && return 0
+  done < <(allowed_chat_ids)
+  return 1
+}
+
 split_records() {
   local raw="$1"
   raw="${raw//,/ }"
@@ -722,7 +744,7 @@ handle_callback_update() {
 
   [[ -n "$callback_id" && -n "$chat_id" && -n "$message_id" && -n "$data" ]] || return 1
 
-  if [[ "$chat_id" != "$TG_CHAT_ID" ]]; then
+  if ! is_authorized_chat "$chat_id"; then
     log "已忽略未授权 Telegram Callback Chat ID：$chat_id"
     answer_callback_query "$callback_id" "未授权"
     return 0
@@ -778,7 +800,7 @@ handle_update() {
 
   [[ -n "$chat_id" && -n "$text" ]] || return 0
 
-  if [[ "$chat_id" != "$TG_CHAT_ID" ]]; then
+  if ! is_authorized_chat "$chat_id"; then
     log "已忽略未授权 Telegram Chat ID：$chat_id"
     return 0
   fi
@@ -811,8 +833,13 @@ main() {
 
   if [[ "${1:-}" == "--send-panel" ]]; then
     shift
+    local note="${*:-面板就绪}" cid
     invalidate_header_cache
-    send_panel "$TG_CHAT_ID" "${*:-面板就绪}"
+    # 推送给所有授权 Chat ID（首条会重建并缓存面板 header，其余复用缓存）。
+    while IFS= read -r cid; do
+      [[ -n "$cid" ]] || continue
+      send_panel "$cid" "$note"
+    done < <(allowed_chat_ids)
     exit 0
   fi
 

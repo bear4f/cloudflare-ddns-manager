@@ -44,6 +44,7 @@ load_env() {
   TG_ENABLED="false"
   TG_BOT_TOKEN=""
   TG_CHAT_ID=""
+  TG_EXTRA_CHAT_IDS=""
   GEO_ENABLED="true"
   IP_CHANGE_ENABLED="false"
   IP_CHANGE_API_URL=""
@@ -221,11 +222,16 @@ COMMENT_EOF
 # Telegram 通知配置
 # TG_ENABLED=true 时，仅在 DNS 记录创建或 IP 变化更新成功后推送。
 # 安装 Telegram Bot 命令服务后，可通过 /changeip 触发换 IP API。
+#
+# 多人共用：TG_EXTRA_CHAT_IDS 填额外授权的 Chat ID（逗号或空格分隔）。
+# 列表中的人可操作 Bot 并接收通知，与主用户同权限，例如：
+# TG_EXTRA_CHAT_IDS='123456789 987654321'
 COMMENT_EOF
 
     printf 'TG_ENABLED=%q\n' "$TG_ENABLED"
     printf 'TG_BOT_TOKEN=%q\n' "$TG_BOT_TOKEN"
     printf 'TG_CHAT_ID=%q\n' "$TG_CHAT_ID"
+    printf 'TG_EXTRA_CHAT_IDS=%q\n' "$TG_EXTRA_CHAT_IDS"
 
     echo
     cat <<'COMMENT_EOF'
@@ -372,11 +378,21 @@ configure_env() {
 
   if [[ "$TG_ENABLED" == "true" ]]; then
     prompt_secret_keep TG_BOT_TOKEN "请输入 Telegram Bot Token"
-    prompt_sensitive_text_keep TG_CHAT_ID "请输入 Telegram Chat ID" "123456789"
+    prompt_sensitive_text_keep TG_CHAT_ID "请输入 Telegram Chat ID（主用户）" "123456789"
+
+    local _extra=""
+    read -r -p "额外授权 Chat ID（多人共用，逗号/空格分隔，回车保留当前）[当前：${TG_EXTRA_CHAT_IDS:-无}]: " _extra || true
+    case "${_extra,,}" in
+      "") : ;;                       # 回车：保留当前值
+      none|clear|-) TG_EXTRA_CHAT_IDS="" ;;   # 显式清空
+      *) TG_EXTRA_CHAT_IDS="$_extra" ;;
+    esac
+
     prompt_bool_keep GEO_ENABLED "是否在面板显示 IP 地区/ISP 归属？（会向第三方查询本机公网 IP）" "${GEO_ENABLED:-true}"
   else
     TG_BOT_TOKEN=""
     TG_CHAT_ID=""
+    TG_EXTRA_CHAT_IDS=""
   fi
 
   save_env
