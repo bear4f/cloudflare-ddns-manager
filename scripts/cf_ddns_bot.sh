@@ -78,6 +78,12 @@ is_authorized_chat() {
   return 1
 }
 
+# 主用户：拥有全部权限。额外授权用户仅能查看当前 IP 与 换IP/更新DDNS，
+# 日志、用户管理、定时器开关等仅主用户可用。
+is_owner_chat() {
+  [[ -n "${TG_CHAT_ID:-}" && "$1" == "$TG_CHAT_ID" ]]
+}
+
 # 当前额外授权 ID（排除主用户、去重、空格分隔）。
 extra_ids_string() {
   local raw="${TG_EXTRA_CHAT_IDS:-}" id seen=" " out=""
@@ -337,7 +343,7 @@ send_panel_text_response() {
   payload="$(jq -n \
     --arg chat_id "$chat_id" \
     --arg text "$caption" \
-    --argjson reply_markup "$(panel_markup)" \
+    --argjson reply_markup "$(panel_markup "$chat_id")" \
     '{chat_id:$chat_id,text:$text,parse_mode:"HTML",reply_markup:$reply_markup}')"
   tg_api sendMessage \
     -H "Content-Type: application/json" \
@@ -385,6 +391,24 @@ configure_bot_commands() {
 }
 
 panel_markup() {
+  local chat_id="${1:-}"
+
+  # 额外授权用户：精简键盘，仅 换IP / 更新DDNS / 刷新（看不到日志、定时器、用户）。
+  if [[ -n "$chat_id" ]] && ! is_owner_chat "$chat_id"; then
+    jq -cn '{
+      inline_keyboard: [
+        [
+          {text:"🔁 换 IP", callback_data:"changeip"},
+          {text:"📡 更新 DDNS", callback_data:"ddns"}
+        ],
+        [
+          {text:"🔄 刷新", callback_data:"refresh"}
+        ]
+      ]
+    }'
+    return 0
+  fi
+
   local timer_state toggle_text toggle_data
   timer_state="$(systemctl is-active cf-ddns.timer 2>/dev/null || true)"
   if [[ "$timer_state" == "active" ]]; then
@@ -549,7 +573,7 @@ send_panel_response() {
   local caption reply_markup image_file response
 
   caption="$(panel_caption "$note")"
-  reply_markup="$(panel_markup)"
+  reply_markup="$(panel_markup "$chat_id")"
   image_file="$(resolve_panel_image_file)"
 
   if [[ -n "$image_file" && -f "$image_file" ]]; then
@@ -606,7 +630,7 @@ edit_panel() {
       --arg chat_id "$chat_id" \
       --argjson message_id "$message_id" \
       --arg caption "$caption" \
-      --argjson reply_markup "$(panel_markup)" \
+      --argjson reply_markup "$(panel_markup "$chat_id")" \
       '{chat_id:$chat_id,message_id:$message_id,caption:$caption,parse_mode:"HTML",reply_markup:$reply_markup}')"
     send_json editMessageCaption "$payload"
   else
@@ -614,7 +638,7 @@ edit_panel() {
       --arg chat_id "$chat_id" \
       --argjson message_id "$message_id" \
       --arg text "$caption" \
-      --argjson reply_markup "$(panel_markup)" \
+      --argjson reply_markup "$(panel_markup "$chat_id")" \
       '{chat_id:$chat_id,message_id:$message_id,text:$text,parse_mode:"HTML",reply_markup:$reply_markup}')"
     send_json editMessageText "$payload"
   fi
@@ -865,6 +889,16 @@ handle_callback_update() {
     return 0
   fi
 
+  # 受限功能仅主用户可用：日志、用户、定时器开关。额外用户点到也拦截。
+  case "$data" in
+    log|users|timer_on|timer_off)
+      if ! is_owner_chat "$chat_id"; then
+        answer_callback_query "$callback_id" "无权限（仅主用户）"
+        return 0
+      fi
+      ;;
+  esac
+
   case "$data" in
     changeip)
       answer_callback_query "$callback_id" "正在换 IP"
@@ -931,6 +965,21 @@ handle_update() {
     arg="${text#* }"
     arg="${arg%% *}"
   fi
+
+  # 受限功能仅主用户可用：日志、用户管理。额外用户调用直接拒绝。
+  case "$cmd" in
+    /log|/users|/adduser|/deluser)
+      if ! is_owner_chat "$chat_id"; then
+        send_message "$chat_id" "无权限：该功能仅主用户可用。"
+        return 0
+      fi
+      ;;
+  esac
+  if [[ "$text" == "📜 日志" ]] && ! is_owner_chat "$chat_id"; then
+    send_message "$chat_id" "无权限：该功能仅主用户可用。"
+    return 0
+  fi
+
   case "$cmd" in
     /start|/panel) send_panel "$chat_id" ;;
     /changeip) handle_changeip_command "$chat_id" ;;
