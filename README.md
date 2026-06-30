@@ -316,7 +316,11 @@ i) 更换 Telegram 面板图片
 /changeip 调用换 IP API，然后自动更新 Cloudflare DDNS
 /ddns     立即运行一次 DDNS 检测
 /status   刷新当前公网 IP 与服务状态
-/log      查看最近 15 行运行日志
+/log      查看最近运行日志（仅主用户）
+/users    查看授权用户（仅主用户）
+/adduser  添加授权用户（仅主用户）；点 👥 用户→➕ 后直接发数字也可
+/deluser  删除授权用户（仅主用户）
+/restart  重启 Bot（仅主用户，等同 /reboot）；卡住时用它恢复
 /help     查看帮助
 ```
 

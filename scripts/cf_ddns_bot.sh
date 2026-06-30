@@ -412,6 +412,7 @@ configure_bot_commands() {
       {command:"users", description:"查看授权用户"},
       {command:"adduser", description:"添加授权用户（仅主用户）"},
       {command:"deluser", description:"删除授权用户（仅主用户）"},
+      {command:"restart", description:"重启 Bot（仅主用户）"},
       {command:"help", description:"帮助"}
     ]
   }')"
@@ -1004,6 +1005,27 @@ handle_deluser_command() {
   fi
 }
 
+# 重启 Bot 服务（仅主用户）。用 systemd-run 在独立 cgroup 触发，避免被自身重启杀掉。
+handle_restart_command() {
+  local chat_id="$1"
+
+  if ! is_owner_chat "$chat_id"; then
+    send_message "$chat_id" "无权限：仅主用户可重启 Bot。"
+    return 0
+  fi
+
+  send_message "$chat_id" "♻️ 正在重启 Bot…约数秒后发送 /panel 打开面板。"
+  log "收到主用户重启指令。"
+
+  if command -v systemd-run >/dev/null 2>&1; then
+    systemd-run --quiet --collect --no-block \
+      systemctl restart cf-ddns-bot.service >/dev/null 2>&1 \
+      || setsid bash -c 'sleep 1; systemctl restart cf-ddns-bot.service' >/dev/null 2>&1 < /dev/null &
+  else
+    setsid bash -c 'sleep 1; systemctl restart cf-ddns-bot.service' >/dev/null 2>&1 < /dev/null &
+  fi
+}
+
 handle_changeip_command() {
   local chat_id="$1"
   local context message_id message_kind
@@ -1093,7 +1115,8 @@ handle_callback_update() {
       render_adduser_prompt "$chat_id" "$message_id" "$message_kind"
       ;;
     udel:*)
-      local del_id="${data#udel:}" current rebuilt found=0 _id
+      # 必须初始化（set -u 下对未初始化变量做 += 会抛 unbound variable 使 Bot 崩溃）。
+      local del_id="${data#udel:}" current="" rebuilt="" found=0 _id=""
       # 先即时应答按钮，避免后续操作或网络抖动让按钮“无反应/转圈”。
       answer_callback_query "$callback_id" "正在删除 $del_id"
       current="$(extra_ids_string)"
@@ -1171,9 +1194,9 @@ handle_update() {
   # 任何命令都会取消“等待输入 Chat ID”的待处理状态。
   [[ "$cmd" == /* ]] && clear_pending
 
-  # 受限功能仅主用户可用：日志、用户管理。额外用户调用直接拒绝。
+  # 受限功能仅主用户可用：日志、用户管理、重启。额外用户调用直接拒绝。
   case "$cmd" in
-    /log|/users|/adduser|/deluser)
+    /log|/users|/adduser|/deluser|/restart|/reboot)
       if ! is_owner_chat "$chat_id"; then
         send_message "$chat_id" "无权限：该功能仅主用户可用。"
         return 0
@@ -1194,6 +1217,7 @@ handle_update() {
     /users) handle_users_command "$chat_id" ;;
     /adduser) handle_adduser_command "$chat_id" "$arg" ;;
     /deluser) handle_deluser_command "$chat_id" "$arg" ;;
+    /restart|/reboot) handle_restart_command "$chat_id" ;;
     /cancel) send_panel "$chat_id" "已取消。" ;;
     /help) send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、刷新、日志、定时器、用户都在面板内；点 👥 用户→➕ 添加用户后直接发 Chat ID 即可。" ;;
     "🔁 换 IP") handle_changeip_command "$chat_id" ;;
@@ -1260,7 +1284,9 @@ main() {
     while IFS= read -r update; do
       [[ -n "$update" ]] || continue
       update_id="$(jq -r '.update_id' <<<"$update")"
-      handle_update "$update"
+      # 在子shell中处理单条更新：即便某个处理分支异常（如 set -u 触发的错误）
+      # 也只影响这一条、不会让整个 Bot 进程退出而陷入崩溃-重启循环。
+      ( handle_update "$update" ) || log "处理更新异常已跳过（update_id=${update_id}）。"
       offset="$((update_id + 1))"
       printf '%s\n' "$offset" > "$offset_file"
     done < <(jq -c '.result[]?' <<<"$response")
