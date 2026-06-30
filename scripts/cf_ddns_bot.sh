@@ -9,6 +9,8 @@ LOG_FILE="/var/log/cf_ddns.log"
 BOT_LOCK_FILE="/run/cf-ddns-bot-command.lock"
 HEADER_CACHE_FILE="/run/cf-ddns-bot-header.cache"
 HEADER_CACHE_TTL=10
+BOT_PENDING_FILE="/run/cf-ddns-bot-pending"   # 待处理交互（如“点 ➕ 后直接发 Chat ID”）
+BOT_PENDING_TTL=300                            # 待处理状态有效期（秒）
 PANEL_IMAGE_FILE="${PANEL_IMAGE_FILE:-}"
 MIN_PANEL_IMAGE_BYTES=1000
 CF_API_BASE="https://api.cloudflare.com/client/v4"
@@ -82,6 +84,33 @@ is_authorized_chat() {
 # 日志、用户管理、定时器开关等仅主用户可用。
 is_owner_chat() {
   [[ -n "${TG_CHAT_ID:-}" && "$1" == "$TG_CHAT_ID" ]]
+}
+
+# 待处理交互状态：记录“某 chat 正等待输入”，配合面板引导直接发数字即可。
+# 格式：chat_id<TAB>action<TAB>message_id<TAB>message_kind<TAB>epoch
+set_pending() {
+  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$(date +%s)" > "$BOT_PENDING_FILE" 2>/dev/null || true
+  chmod 600 "$BOT_PENDING_FILE" 2>/dev/null || true
+}
+
+clear_pending() {
+  rm -f "$BOT_PENDING_FILE" 2>/dev/null || true
+}
+
+# 命中且未过期则输出 “chat_id<TAB>action<TAB>message_id<TAB>message_kind” 并返回 0。
+get_pending() {
+  local want_chat="$1" line p_chat p_action p_mid p_kind p_ts now
+  [[ -f "$BOT_PENDING_FILE" ]] || return 1
+  line="$(cat "$BOT_PENDING_FILE" 2>/dev/null || true)"
+  IFS=$'\t' read -r p_chat p_action p_mid p_kind p_ts <<<"$line"
+  [[ "$p_chat" == "$want_chat" ]] || return 1
+  [[ "$p_ts" =~ ^[0-9]+$ ]] || { clear_pending; return 1; }
+  now="$(date +%s)"
+  if (( now - p_ts > BOT_PENDING_TTL )); then
+    clear_pending
+    return 1
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$p_chat" "$p_action" "$p_mid" "$p_kind"
 }
 
 # 当前额外授权 ID（排除主用户、去重、空格分隔）。
@@ -720,16 +749,42 @@ render_users_page() {
   edit_message_view "$chat_id" "$message_id" "$message_kind" "$text" "$markup"
 }
 
-# 子页面：添加用户提示（添加需输入 ID，引导用 /adduser）。
-render_adduser_hint() {
+# 子页面：添加用户提示——直接发送 Chat ID 即可（无需输入 /adduser）。
+render_adduser_prompt() {
   local chat_id="$1" message_id="$2" message_kind="$3"
   local text markup
-  text="$(printf '➕ <b>添加授权用户</b>\n\n请发送：<code>/adduser &lt;chat_id&gt;</code>\n例如 <code>/adduser 123456789</code>\n\n新用户需先自己给本 Bot 发过一条消息；个人为正整数，群组为负数。')"
+  text="$(printf '➕ <b>添加授权用户</b>　🕒 %s\n\n请直接发送要添加的 <b>Chat ID</b>（纯数字；群组为负数）。\n发完即自动添加，<b>无需输入 /adduser</b>。\n\n新用户需先自己给本 Bot 发过一条消息。' "$(date '+%H:%M:%S')")"
   markup="$(jq -cn '{inline_keyboard:[[
-    {text:"⬅️ 返回用户管理", callback_data:"users"},
-    {text:"🏠 主面板", callback_data:"home"}
+    {text:"⬅️ 取消 / 返回", callback_data:"users"}
   ]]}')"
   edit_message_view "$chat_id" "$message_id" "$message_kind" "$text" "$markup"
+}
+
+# 从“直接发数字”流程添加用户：已确保 arg 为整数；校验自身/重复后写入并刷新列表。
+handle_adduser_from_prompt() {
+  local chat_id="$1" arg="$2" message_id="$3" message_kind="$4"
+  local current
+
+  if [[ "$arg" == "$TG_CHAT_ID" ]]; then
+    send_message "$chat_id" "该 ID 已是主用户，无需添加。"
+    render_users_page "$chat_id" "$message_id" "$message_kind"
+    return 0
+  fi
+
+  current="$(extra_ids_string)"
+  if [[ " $current " == *" $arg "* ]]; then
+    send_message "$chat_id" "该用户已在列表中：$arg"
+    render_users_page "$chat_id" "$message_id" "$message_kind"
+    return 0
+  fi
+
+  if persist_extra_chat_ids "${current:+$current }$arg"; then
+    log "已添加授权用户：$arg"
+  else
+    send_message "$chat_id" "保存失败，请检查服务器配置文件权限。"
+  fi
+  # 直接刷新用户管理子页：新用户出现在列表即为确认，无需额外气泡。
+  render_users_page "$chat_id" "$message_id" "$message_kind"
 }
 
 command_name() {
@@ -998,6 +1053,9 @@ handle_callback_update() {
     return 0
   fi
 
+  # 除了再次点 ➕，任何其它操作都取消“等待输入 Chat ID”的待处理状态。
+  [[ "$data" == "uadd" ]] || clear_pending
+
   # 受限功能仅主用户可用：日志、用户管理（含增删）、定时器开关。额外用户点到也拦截。
   case "$data" in
     log|users|uadd|udel:*|timer_on|timer_off)
@@ -1031,7 +1089,8 @@ handle_callback_update() {
       ;;
     uadd)
       answer_callback_query "$callback_id" "添加用户"
-      render_adduser_hint "$chat_id" "$message_id" "$message_kind"
+      set_pending "$chat_id" "adduser" "$message_id" "$message_kind"
+      render_adduser_prompt "$chat_id" "$message_id" "$message_kind"
       ;;
     udel:*)
       local del_id="${data#udel:}" current rebuilt found=0 _id
@@ -1086,6 +1145,19 @@ handle_update() {
     return 0
   fi
 
+  # “点 ➕ 添加用户”后：本 chat 处于待添加状态时，直接发一串数字即视为要添加的 Chat ID。
+  if [[ "$text" =~ ^-?[0-9]+$ ]]; then
+    local pend p_action p_mid p_kind
+    if pend="$(get_pending "$chat_id")"; then
+      IFS=$'\t' read -r _ p_action p_mid p_kind <<<"$pend"
+      if [[ "$p_action" == "adduser" ]] && is_owner_chat "$chat_id"; then
+        clear_pending
+        handle_adduser_from_prompt "$chat_id" "$text" "$p_mid" "$p_kind"
+        return 0
+      fi
+    fi
+  fi
+
   cmd="$(command_name "$text")"
   # 取命令后的第一个参数（如 /adduser 123456 -> 123456）。
   local arg=""
@@ -1093,6 +1165,9 @@ handle_update() {
     arg="${text#* }"
     arg="${arg%% *}"
   fi
+
+  # 任何命令都会取消“等待输入 Chat ID”的待处理状态。
+  [[ "$cmd" == /* ]] && clear_pending
 
   # 受限功能仅主用户可用：日志、用户管理。额外用户调用直接拒绝。
   case "$cmd" in
@@ -1117,7 +1192,8 @@ handle_update() {
     /users) handle_users_command "$chat_id" ;;
     /adduser) handle_adduser_command "$chat_id" "$arg" ;;
     /deluser) handle_deluser_command "$chat_id" "$arg" ;;
-    /help) send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、刷新、日志、定时器、用户都在面板内；/adduser、/deluser 增删授权用户。" ;;
+    /cancel) send_panel "$chat_id" "已取消。" ;;
+    /help) send_panel "$chat_id" "按钮说明：换 IP、更新 DDNS、刷新、日志、定时器、用户都在面板内；点 👥 用户→➕ 添加用户后直接发 Chat ID 即可。" ;;
     "🔁 换 IP") handle_changeip_command "$chat_id" ;;
     "📡 更新 DDNS") handle_ddns_command "$chat_id" ;;
     "🔄 刷新") invalidate_header_cache; send_panel "$chat_id" "状态已刷新。" ;;
