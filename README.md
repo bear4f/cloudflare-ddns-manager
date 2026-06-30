@@ -127,6 +127,7 @@ sudo ddns
 | `7` | 立即调用换 IP API 并更新 DDNS |
 | `8` | 安装 / 更新 Telegram Bot 命令服务 |
 | `9` | 停用 Telegram Bot 命令服务 |
+| `i` | 更换 Telegram 面板图片（URL 或本地路径，自动下载校验） |
 | `l` | 实时跟随日志（`journalctl -f`） |
 | `u` | 在线更新到最新版本 |
 | `x` | 彻底卸载并清理 |
@@ -169,6 +170,7 @@ TG_CHAT_ID=''                         # 主用户 Chat ID
 TG_EXTRA_CHAT_IDS=''                  # 多人共用：额外授权 Chat ID，逗号/空格分隔，如 '123456789 987654321'
 
 GEO_ENABLED='true'                    # 面板显示 IP 地区/ISP 归属（会向第三方查询本机公网 IP）
+PANEL_IMAGE_FILE=''                   # 自定义面板图片的绝对路径（留空用内置默认图，建议用菜单 i 设置）
 ```
 
 > 请勿把真实的 `cf_ddns.env` 上传到 GitHub。
@@ -282,6 +284,28 @@ systemctl status cf-ddns.service --no-pager
 ```
 
 > `🌍 IP 归属` 默认开启，会向第三方地理库（ip-api.com / ipwho.is）查询本机公网 IP。如不希望外发，在 `sudo ddns` → `1` 配置时关闭，或在 `cf_ddns.env` 设 `GEO_ENABLED='false'`。
+
+### 更换面板图片
+
+面板顶部的配图可自定义。`sudo ddns` → `i`（更换 Telegram 面板图片），输入：
+
+- **图片直链 URL**（http/https，如图床链接）——系统会自动下载；
+- 或**服务器本地文件路径**。
+
+脚本会校验为完整的 **PNG / JPG**（1KB ~ 10MB），通过后保存到 `/usr/local/ddns/panel_custom.<png|jpg>` 并写入配置项 `PANEL_IMAGE_FILE`：
+
+```text
+i) 更换 Telegram 面板图片
+   → 输入 https://your-image-host.example/panel.png
+   → 校验通过后安装，重启 Bot 即生效
+   → 输入 reset 可恢复内置默认图片
+```
+
+设置后执行 `sudo systemctl restart cf-ddns-bot.service`，发送 `/panel` 验证。
+
+- 自定义图片存放在独立文件（`panel_custom.*`）并由 `PANEL_IMAGE_FILE` 指向，**在线更新（`u`）不会被覆盖**；
+- 校验失败多为图片不完整或非 PNG/JPG，可用看图软件重新导出为标准格式再试；
+- 若图片有效但 Telegram 仍发不出（尺寸/比例不符其限制），Bot 会自动退回文字面板并在日志记录原因。
 
 可用命令：
 

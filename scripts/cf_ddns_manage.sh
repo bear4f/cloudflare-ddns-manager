@@ -13,6 +13,9 @@ TIMER_FILE="/etc/systemd/system/cf-ddns.timer"
 BOT_SERVICE_FILE="/etc/systemd/system/cf-ddns-bot.service"
 CF_API_BASE="https://api.cloudflare.com/client/v4"
 INSTALL_URL="https://raw.githubusercontent.com/bear4f/cloudflare-ddns-manager/main/install-online.sh"
+CUSTOM_PANEL_BASENAME="panel_custom"
+PANEL_IMAGE_MIN_BYTES=1000
+PANEL_IMAGE_MAX_BYTES=$((10 * 1024 * 1024))   # Telegram 上传图片上限 10MB
 
 # 颜色（仅在交互终端启用）。
 if [[ -t 1 ]]; then
@@ -46,6 +49,7 @@ load_env() {
   TG_CHAT_ID=""
   TG_EXTRA_CHAT_IDS=""
   GEO_ENABLED="true"
+  PANEL_IMAGE_FILE=""
   IP_CHANGE_ENABLED="false"
   IP_CHANGE_API_URL=""
   IP_CHANGE_API_FORMAT_JSON="true"
@@ -238,9 +242,13 @@ COMMENT_EOF
 # 面板显示选项
 # GEO_ENABLED=true 时，Telegram 面板会显示公网 IP 的地区 / ISP 归属。
 # 该功能会把本机公网 IP 发送给第三方地理库（ip-api.com / ipwho.is）查询。
+#
+# PANEL_IMAGE_FILE：自定义面板图片的绝对路径（留空则用内置默认图）。
+# 建议通过菜单「i) 更换 Telegram 面板图片」设置，会自动下载校验并填好本项。
 COMMENT_EOF
 
     printf 'GEO_ENABLED=%q\n' "$GEO_ENABLED"
+    printf 'PANEL_IMAGE_FILE=%q\n' "$PANEL_IMAGE_FILE"
   } > "$tmp"
 
   install -m 600 "$tmp" "$ENV_FILE"
@@ -542,6 +550,114 @@ test_telegram() {
   fi
 }
 
+# 校验图片：类型(png/jpg) + 字节范围 + 魔数 + 结尾标记（截断图会让 Telegram 报错）。
+# 成功时输出 png / jpg，失败返回 1。
+detect_valid_image_type() {
+  local f="$1" bytes magic trailer
+  [[ -f "$f" ]] || return 1
+  bytes="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+  [[ "$bytes" =~ ^[0-9]+$ ]] || return 1
+  [[ "$bytes" -ge "$PANEL_IMAGE_MIN_BYTES" && "$bytes" -le "$PANEL_IMAGE_MAX_BYTES" ]] || return 1
+
+  magic="$(LC_ALL=C od -An -N8 -tx1 "$f" 2>/dev/null | tr -d ' \n')"
+  case "$magic" in
+    89504e470d0a1a0a*)
+      trailer="$(LC_ALL=C tail -c 12 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+      [[ "$trailer" == "0000000049454e44ae426082" ]] || return 1
+      printf 'png\n'
+      ;;
+    ffd8ff*)
+      trailer="$(LC_ALL=C tail -c 2 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+      [[ "$trailer" == "ffd9" ]] || return 1
+      printf 'jpg\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# 更换 Telegram 面板图片：支持图片直链 URL 或服务器本地路径，下载/读取→校验→
+# 安装到 $BASE_DIR/panel_custom.<ext> 并写入 PANEL_IMAGE_FILE（升级不会覆盖）。
+set_panel_image() {
+  ensure_deps || return 1
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo "尚未配置，请先选择 1 初始化/修改配置。"
+    return 1
+  fi
+
+  load_env
+
+  echo
+  echo "=== 更换 Telegram 面板图片 ==="
+  echo "支持：图片直链 URL（http/https）或服务器本地文件路径。"
+  echo "要求：完整的 PNG 或 JPG，${PANEL_IMAGE_MIN_BYTES} 字节 ~ 10MB；建议横向、尺寸适中。"
+  echo "输入 reset 可恢复内置默认图片；直接回车取消。"
+  if [[ -n "${PANEL_IMAGE_FILE:-}" ]]; then
+    echo "当前自定义图片：${PANEL_IMAGE_FILE}"
+  else
+    echo "当前：使用内置默认图片。"
+  fi
+  echo
+
+  local src=""
+  read -r -p "请输入图片 URL 或本地路径: " src || true
+  src="${src#"${src%%[![:space:]]*}"}"   # 去掉首部空白
+  src="${src%"${src##*[![:space:]]}"}"   # 去掉尾部空白
+  [[ -n "$src" ]] || { echo "已取消。"; return 0; }
+
+  case "${src,,}" in
+    reset|default|-)
+      rm -f "$BASE_DIR/${CUSTOM_PANEL_BASENAME}.png" "$BASE_DIR/${CUSTOM_PANEL_BASENAME}.jpg"
+      PANEL_IMAGE_FILE=""
+      save_env
+      echo "已恢复为内置默认面板图片。"
+      echo "提示：执行 sudo systemctl restart cf-ddns-bot.service 后下一次面板刷新即生效。"
+      return 0
+      ;;
+  esac
+
+  local tmp=""
+  tmp="$(mktemp)"
+  if [[ "$src" =~ ^https?:// ]]; then
+    echo "正在下载图片..."
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$tmp" "$src"; then
+      rm -f "$tmp"
+      echo "下载失败，请检查链接是否为图片直链、网络是否可达。"
+      return 1
+    fi
+  elif [[ -f "$src" ]]; then
+    cp -f "$src" "$tmp" 2>/dev/null || { rm -f "$tmp"; echo "读取本地文件失败：$src"; return 1; }
+  else
+    rm -f "$tmp"
+    echo "无效输入：既不是 http(s) 链接，也不是存在的本地文件。"
+    return 1
+  fi
+
+  local itype=""
+  if ! itype="$(detect_valid_image_type "$tmp")"; then
+    rm -f "$tmp"
+    echo "图片校验未通过：必须是完整的 PNG 或 JPG，且大小在 ${PANEL_IMAGE_MIN_BYTES} 字节 ~ 10MB。"
+    echo "（若你的图片确实有效，可用看图软件重新导出为标准 PNG/JPG 后再试。）"
+    return 1
+  fi
+
+  # 只保留一种自定义图，避免新旧并存。
+  rm -f "$BASE_DIR/${CUSTOM_PANEL_BASENAME}.png" "$BASE_DIR/${CUSTOM_PANEL_BASENAME}.jpg"
+  local target="$BASE_DIR/${CUSTOM_PANEL_BASENAME}.${itype}"
+  install -m 600 "$tmp" "$target"
+  rm -f "$tmp"
+
+  PANEL_IMAGE_FILE="$target"
+  save_env
+  chmod 700 "$BASE_DIR"
+
+  echo "已更换面板图片：$target（${itype^^}，$(wc -c < "$target" | tr -d ' ') 字节）"
+  echo "提示：执行 sudo systemctl restart cf-ddns-bot.service 后，发送 /panel 验证。"
+  echo "若 Telegram 仍发不出图（尺寸/比例不符），Bot 会自动退回文字面板并记录原因。"
+}
+
 show_status() {
   echo
   echo "=== systemd timer ==="
@@ -683,6 +799,7 @@ print_menu() {
   echo "  ${C_BOLD}7)${C_RESET} 立即调用换 IP API 并更新 DDNS"
   echo "  ${C_BOLD}8)${C_RESET} 安装/更新 Telegram Bot 命令服务"
   echo "  ${C_BOLD}9)${C_RESET} 停用 Telegram Bot 命令服务"
+  echo "  ${C_BOLD}i)${C_RESET} 更换 Telegram 面板图片"
   echo "  ${C_BOLD}l)${C_RESET} 实时跟随日志"
   echo "  ${C_BOLD}u)${C_RESET} 更新到最新版本"
   echo "  ${C_BOLD}x)${C_RESET} ${C_RED}彻底卸载并清理${C_RESET}"
@@ -709,6 +826,7 @@ main() {
       7) change_ip_once; pause ;;
       8) install_bot_service; pause ;;
       9) disable_bot_service; pause ;;
+      i|I) set_panel_image; pause ;;
       l|L) follow_log; pause ;;
       u|U) update_self; pause ;;
       x|X) uninstall_all; pause ;;
