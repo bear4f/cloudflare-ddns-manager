@@ -188,8 +188,20 @@ cf_get_record_ip() {
 
 timer_interval() {
   [[ -f "$TIMER_UNIT_FILE" ]] || { printf '未知'; return; }
-  local v
-  v="$(sed -n 's/^OnUnitActiveSec=//p' "$TIMER_UNIT_FILE" 2>/dev/null | head -n1)"
+  local v cal
+  # 兼容旧版 OnUnitActiveSec=Nmin。去掉首尾空白，避免读到空字符串显示「未知」。
+  v="$(sed -n 's/^[[:space:]]*OnUnitActiveSec[[:space:]]*=[[:space:]]*//p' "$TIMER_UNIT_FILE" 2>/dev/null | head -n1)"
+  v="${v//[[:space:]]/}"
+  if [[ -z "$v" ]]; then
+    # 新版定时器用 OnCalendar（如 *:0/2 表示每 2 分钟）。容错提取分钟步进 /N。
+    cal="$(sed -n 's/^[[:space:]]*OnCalendar[[:space:]]*=[[:space:]]*//p' "$TIMER_UNIT_FILE" 2>/dev/null | head -n1)"
+    cal="${cal%%[[:space:]]*}"
+    if [[ "$cal" =~ /([0-9]+)$ ]]; then
+      v="${BASH_REMATCH[1]}min"
+    elif [[ -n "$cal" ]]; then
+      v="$cal"
+    fi
+  fi
   printf '%s' "${v:-未知}"
 }
 

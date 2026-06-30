@@ -411,9 +411,11 @@ EOF
 Description=Run Cloudflare DDNS every ${minutes} minutes
 
 [Timer]
+# 用按钟点的 OnCalendar，每 ${minutes} 分钟整必定触发；不依赖服务上次激活时间，
+# 运行中重装定时器后也会在下一个时间点照常触发（避免 OnUnitActiveSec 失去锚点而不再运行）。
+OnCalendar=*:0/${minutes}
 OnBootSec=30s
-OnUnitActiveSec=${minutes}min
-AccuracySec=30s
+AccuracySec=1s
 Persistent=true
 Unit=cf-ddns.service
 
@@ -422,8 +424,12 @@ WantedBy=timers.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable --now cf-ddns.timer
+  systemctl enable cf-ddns.timer
   systemctl restart cf-ddns.timer
+
+  # 安装后立即同步一次：既给用户即时反馈，也确保服务有一条运行记录。
+  echo "立即运行一次 DDNS 检测..."
+  systemctl start cf-ddns.service || bash "$WORKER" || true
 
   echo "已安装/更新定时器：每 ${minutes} 分钟检测一次。"
   systemctl list-timers --all | grep -E 'cf-ddns|NEXT' || true

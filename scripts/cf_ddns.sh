@@ -9,6 +9,12 @@ BOT_WORKER="$BASE_DIR/cf_ddns_bot.sh"
 CF_API_BASE="https://api.cloudflare.com/client/v4"
 MAX_LOG_BYTES="${MAX_LOG_BYTES:-2097152}"   # 2 MiB，超过则只保留最后 1000 行
 
+# 公网 IP 检测的整组重试：换 IP 瞬间出口 NAT 链路会短暂重建，
+# 单次查询很容易失败。整组数据源轮询失败后等待数秒再重试，
+# 避免一次网络空窗就让本轮检测整轮作废。
+IP_LOOKUP_ROUNDS="${IP_LOOKUP_ROUNDS:-3}"
+IP_LOOKUP_RETRY_GAP="${IP_LOOKUP_RETRY_GAP:-3}"
+
 # 公网 IP 数据源（多源容错，任一可用即可）。
 PUBLIC_IP4_SOURCES=(
   "https://api.ipify.org"
@@ -23,7 +29,10 @@ PUBLIC_IP6_SOURCES=(
 
 log() {
   local message="$1"
-  printf '[%s] %s\n' "$(date '+%F %T')" "$message" | tee -a "$LOG_FILE"
+  # 控制台副本写到 stderr：update_one_record 通过 $(...) 捕获 stdout 来判断
+  # “本条记录是否有变更”，若 log 也写 stdout，未变化的“IP 未变化”日志会被
+  # 误当成变更，导致每轮都推送面板。写到 stderr 即可两不相扰（日志文件照常写入）。
+  printf '[%s] %s\n' "$(date '+%F %T')" "$message" | tee -a "$LOG_FILE" >&2
 }
 
 die() {
@@ -119,10 +128,12 @@ urlencode() {
 is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 is_ipv6() { [[ "$1" == *:* && "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
 
-# 根据记录类型获取公网 IP，多源轮询。
+# 根据记录类型获取公网 IP，多源轮询并整组重试。
+# 失败时只返回非 0（不调用 die），由 main 跳过本轮并等待下个周期重试，
+# 避免一次瞬时网络抖动直接中止整个脚本（set -e）而废掉整轮检测。
 get_public_ip() {
   local record_type="${1:-A}"
-  local sources=() curl_proto ip src
+  local sources=() curl_proto ip src round
 
   if [[ "$record_type" == "AAAA" ]]; then
     sources=("${PUBLIC_IP6_SOURCES[@]}")
@@ -132,16 +143,21 @@ get_public_ip() {
     curl_proto="-4"
   fi
 
-  for src in "${sources[@]}"; do
-    ip="$(curl -fsS "$curl_proto" --retry 1 --connect-timeout 5 --max-time 10 "$src" 2>/dev/null | tr -d '[:space:]')" || true
-    if [[ "$record_type" == "AAAA" ]]; then
-      is_ipv6 "$ip" && { printf '%s\n' "$ip"; return 0; }
-    else
-      is_ipv4 "$ip" && { printf '%s\n' "$ip"; return 0; }
-    fi
+  for ((round = 1; round <= IP_LOOKUP_ROUNDS; round++)); do
+    for src in "${sources[@]}"; do
+      ip="$(curl -fsS "$curl_proto" --retry 2 --connect-timeout 5 --max-time 10 "$src" 2>/dev/null | tr -d '[:space:]')" || true
+      if [[ "$record_type" == "AAAA" ]]; then
+        is_ipv6 "$ip" && { printf '%s\n' "$ip"; return 0; }
+      else
+        is_ipv4 "$ip" && { printf '%s\n' "$ip"; return 0; }
+      fi
+    done
+    [[ "$round" -lt "$IP_LOOKUP_ROUNDS" ]] && sleep "$IP_LOOKUP_RETRY_GAP"
   done
 
-  die "无法从任一数据源获取有效公网 ${record_type} 地址。"
+  # 注意：重定向到 stderr，避免污染调用处 $(get_public_ip) 捕获的标准输出。
+  log "无法从任一数据源获取有效公网 ${record_type} 地址（已重试 ${IP_LOOKUP_ROUNDS} 轮）。" >&2
+  return 1
 }
 
 # 把 RECORD_NAME 拆成数组（支持逗号/空格分隔的多条记录）。
@@ -222,7 +238,10 @@ main() {
   cap_log_file
 
   local current_ip zone_query zone_resp zone_id
-  current_ip="$(get_public_ip "$record_type")"
+  if ! current_ip="$(get_public_ip "$record_type")"; then
+    log "本轮 DDNS 跳过：暂时无法获取公网 ${record_type} 地址，等待下个周期重试。"
+    return 0
+  fi
   zone_query="$(urlencode "$ZONE_NAME")"
 
   zone_resp="$(cf_api GET "/zones?name=${zone_query}&status=active")" || die "查询 Cloudflare Zone 失败。"
