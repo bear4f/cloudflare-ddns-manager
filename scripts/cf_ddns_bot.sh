@@ -644,6 +644,94 @@ edit_panel() {
   fi
 }
 
+# 在同一条面板消息内切换“子页面”：用任意文本 + 任意按钮编辑当前消息，
+# 而不是另发新气泡。图片面板编辑 caption（≤1024 字符），文字面板编辑 text。
+edit_message_view() {
+  local chat_id="$1" message_id="$2" message_kind="$3" text="$4" markup="$5"
+  local payload
+
+  [[ -n "$message_id" ]] || return 1
+
+  if [[ "$message_kind" == "photo" ]]; then
+    payload="$(jq -n \
+      --arg chat_id "$chat_id" \
+      --argjson message_id "$message_id" \
+      --arg caption "$text" \
+      --argjson reply_markup "$markup" \
+      '{chat_id:$chat_id,message_id:$message_id,caption:$caption,parse_mode:"HTML",reply_markup:$reply_markup}')"
+    send_json editMessageCaption "$payload"
+  else
+    payload="$(jq -n \
+      --arg chat_id "$chat_id" \
+      --argjson message_id "$message_id" \
+      --arg text "$text" \
+      --argjson reply_markup "$markup" \
+      '{chat_id:$chat_id,message_id:$message_id,text:$text,parse_mode:"HTML",reply_markup:$reply_markup}')"
+    send_json editMessageText "$payload"
+  fi
+}
+
+# 子页面：最近日志（整合进面板消息，带「返回主面板」按钮）。
+render_log_page() {
+  local chat_id="$1" message_id="$2" message_kind="$3"
+  local lines text markup
+
+  if [[ -f "$LOG_FILE" ]]; then
+    lines="$(tail -n 12 "$LOG_FILE" 2>/dev/null || true)"
+  fi
+  [[ -n "${lines:-}" ]] || lines="暂无日志。"
+  # 限制长度，避免超过图片 caption 1024 上限（取最后约 850 字节）。
+  if [[ "${#lines}" -gt 850 ]]; then
+    lines="…${lines: -850}"
+  fi
+
+  text="$(printf '📜 <b>最近日志</b>　🕒 %s\n<pre>%s</pre>' "$(date '+%H:%M:%S')" "$(html_escape "$lines")")"
+  markup="$(jq -cn '{inline_keyboard:[[
+    {text:"🔄 刷新日志", callback_data:"log"},
+    {text:"🏠 返回主面板", callback_data:"home"}
+  ]]}')"
+  edit_message_view "$chat_id" "$message_id" "$message_kind" "$text" "$markup"
+}
+
+# 子页面：授权用户管理（列表 + 添加 + 逐个删除 + 返回）。
+render_users_page() {
+  local chat_id="$1" message_id="$2" message_kind="$3"
+  local extras text markup ids_json shown
+
+  extras="$(extra_ids_string)"
+  if [[ -n "$extras" ]]; then
+    shown="$(html_escape "$extras")"
+    ids_json="$(printf '%s\n' $extras | jq -R . | jq -s 'map(select(length>0))')"
+  else
+    shown="（无）"
+    ids_json="[]"
+  fi
+
+  text="$(printf '👥 <b>授权用户管理</b>　🕒 %s\n\n主用户：<code>%s</code>\n额外用户：<code>%s</code>\n\n点 🗑 删除对应用户，➕ 添加用户。' \
+    "$(date '+%H:%M:%S')" "$(html_escape "${TG_CHAT_ID:-}")" "$shown")"
+
+  markup="$(jq -cn --argjson ids "$ids_json" '{
+    inline_keyboard:
+      ( [[{text:"➕ 添加用户", callback_data:"uadd"}]]
+        + ( $ids | map([{text:("🗑 " + .), callback_data:("udel:" + .)}]) )
+        + [[{text:"🏠 返回主面板", callback_data:"home"}]]
+      )
+  }')"
+  edit_message_view "$chat_id" "$message_id" "$message_kind" "$text" "$markup"
+}
+
+# 子页面：添加用户提示（添加需输入 ID，引导用 /adduser）。
+render_adduser_hint() {
+  local chat_id="$1" message_id="$2" message_kind="$3"
+  local text markup
+  text="$(printf '➕ <b>添加授权用户</b>\n\n请发送：<code>/adduser &lt;chat_id&gt;</code>\n例如 <code>/adduser 123456789</code>\n\n新用户需先自己给本 Bot 发过一条消息；个人为正整数，群组为负数。')"
+  markup="$(jq -cn '{inline_keyboard:[[
+    {text:"⬅️ 返回用户管理", callback_data:"users"},
+    {text:"🏠 主面板", callback_data:"home"}
+  ]]}')"
+  edit_message_view "$chat_id" "$message_id" "$message_kind" "$text" "$markup"
+}
+
 command_name() {
   local text="$1"
   local first="${text%% *}"
@@ -748,16 +836,26 @@ handle_timer_toggle() {
   edit_panel "$chat_id" "$message_id" "$message_kind" "$note"
 }
 
+# 命令/文本入口：打开一个面板上下文，再把日志渲染进同一条消息（带返回按钮）。
 handle_log() {
   local chat_id="$1"
-  local lines
+  local context message_id message_kind lines
 
-  if [[ -f "$LOG_FILE" ]]; then
-    lines="$(tail -n 15 "$LOG_FILE" 2>/dev/null || true)"
+  context="$(open_panel_context "$chat_id" "最近日志")"
+  message_id="${context%%$'\t'*}"
+  message_kind="${context##*$'\t'}"
+
+  if [[ -z "$message_id" ]]; then
+    # 无法创建面板时退回普通气泡。
+    if [[ -f "$LOG_FILE" ]]; then
+      lines="$(tail -n 15 "$LOG_FILE" 2>/dev/null || true)"
+    fi
+    [[ -n "${lines:-}" ]] || lines="暂无日志。"
+    send_html_message "$chat_id" "$(printf '📜 <b>最近日志</b>\n<pre>%s</pre>' "$(html_escape "$lines")")"
+    return 0
   fi
-  [[ -n "${lines:-}" ]] || lines="暂无日志。"
 
-  send_html_message "$chat_id" "$(printf '📜 <b>最近日志（15 行）</b>\n<pre>%s</pre>' "$(html_escape "$lines")")"
+  render_log_page "$chat_id" "$message_id" "$message_kind"
 }
 
 handle_help_panel() {
@@ -769,13 +867,24 @@ handle_help_panel() {
     "换 IP=调用 API 并更新 DDNS；更新 DDNS=只检测 DNS；刷新=更新状态；日志=最近 15 行；定时器=启用/停用自动检测；用户=查看授权用户（/adduser、/deluser 增删）。"
 }
 
+# 命令/文本入口：打开面板上下文，再渲染“用户管理”子页面到同一条消息。
 handle_users_command() {
   local chat_id="$1"
-  local extras
-  extras="$(extra_ids_string)"
-  [[ -n "$extras" ]] || extras="（无）"
-  send_html_message "$chat_id" "$(printf '👥 <b>授权用户</b>\n主用户：<code>%s</code>\n额外：<code>%s</code>\n\n添加：<code>/adduser &lt;chat_id&gt;</code>\n删除：<code>/deluser &lt;chat_id&gt;</code>\n（仅主用户可增删；新用户需先自己给本 Bot 发过一条消息）' \
-    "$(html_escape "${TG_CHAT_ID:-}")" "$(html_escape "$extras")")"
+  local context message_id message_kind extras
+
+  context="$(open_panel_context "$chat_id" "用户管理")"
+  message_id="${context%%$'\t'*}"
+  message_kind="${context##*$'\t'}"
+
+  if [[ -z "$message_id" ]]; then
+    extras="$(extra_ids_string)"
+    [[ -n "$extras" ]] || extras="（无）"
+    send_html_message "$chat_id" "$(printf '👥 <b>授权用户</b>\n主用户：<code>%s</code>\n额外：<code>%s</code>\n\n添加：<code>/adduser &lt;chat_id&gt;</code>\n删除：<code>/deluser &lt;chat_id&gt;</code>' \
+      "$(html_escape "${TG_CHAT_ID:-}")" "$(html_escape "$extras")")"
+    return 0
+  fi
+
+  render_users_page "$chat_id" "$message_id" "$message_kind"
 }
 
 handle_adduser_command() {
@@ -889,9 +998,9 @@ handle_callback_update() {
     return 0
   fi
 
-  # 受限功能仅主用户可用：日志、用户、定时器开关。额外用户点到也拦截。
+  # 受限功能仅主用户可用：日志、用户管理（含增删）、定时器开关。额外用户点到也拦截。
   case "$data" in
-    log|users|timer_on|timer_off)
+    log|users|uadd|udel:*|timer_on|timer_off)
       if ! is_owner_chat "$chat_id"; then
         answer_callback_query "$callback_id" "无权限（仅主用户）"
         return 0
@@ -913,12 +1022,31 @@ handle_callback_update() {
       handle_refresh_panel "$chat_id" "$message_id" "$message_kind"
       ;;
     log)
-      answer_callback_query "$callback_id" "正在拉取日志"
-      handle_log "$chat_id"
+      answer_callback_query "$callback_id" "最近日志"
+      render_log_page "$chat_id" "$message_id" "$message_kind"
       ;;
     users)
-      answer_callback_query "$callback_id" "授权用户"
-      handle_users_command "$chat_id"
+      answer_callback_query "$callback_id" "用户管理"
+      render_users_page "$chat_id" "$message_id" "$message_kind"
+      ;;
+    uadd)
+      answer_callback_query "$callback_id" "添加用户"
+      render_adduser_hint "$chat_id" "$message_id" "$message_kind"
+      ;;
+    udel:*)
+      local del_id="${data#udel:}" current rebuilt found=0 _id
+      current="$(extra_ids_string)"
+      for _id in $current; do
+        if [[ "$_id" == "$del_id" ]]; then found=1; continue; fi
+        rebuilt+="${rebuilt:+ }$_id"
+      done
+      if [[ "$found" -eq 1 ]] && persist_extra_chat_ids "$rebuilt"; then
+        log "已删除授权用户：$del_id"
+        answer_callback_query "$callback_id" "已删除 $del_id"
+      else
+        answer_callback_query "$callback_id" "删除失败或不存在"
+      fi
+      render_users_page "$chat_id" "$message_id" "$message_kind"
       ;;
     timer_on)
       answer_callback_query "$callback_id" "正在启用定时器"
@@ -932,8 +1060,8 @@ handle_callback_update() {
       answer_callback_query "$callback_id" "帮助"
       handle_help_panel "$chat_id" "$message_id" "$message_kind"
       ;;
-    panel)
-      answer_callback_query "$callback_id" "已刷新"
+    home|panel)
+      answer_callback_query "$callback_id" "已返回主面板"
       handle_refresh_panel "$chat_id" "$message_id" "$message_kind"
       ;;
     *) send_message "$chat_id" "未知按钮。发送 /panel 重新打开控制面板。" ;;
