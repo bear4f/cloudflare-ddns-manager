@@ -29,7 +29,10 @@ PUBLIC_IP6_SOURCES=(
 
 log() {
   local message="$1"
-  printf '[%s] %s\n' "$(date '+%F %T')" "$message" | tee -a "$LOG_FILE"
+  # 控制台副本写到 stderr：update_one_record 通过 $(...) 捕获 stdout 来判断
+  # “本条记录是否有变更”，若 log 也写 stdout，未变化的“IP 未变化”日志会被
+  # 误当成变更，导致每轮都推送面板。写到 stderr 即可两不相扰（日志文件照常写入）。
+  printf '[%s] %s\n' "$(date '+%F %T')" "$message" | tee -a "$LOG_FILE" >&2
 }
 
 die() {

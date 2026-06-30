@@ -188,8 +188,17 @@ cf_get_record_ip() {
 
 timer_interval() {
   [[ -f "$TIMER_UNIT_FILE" ]] || { printf '未知'; return; }
-  local v
+  local v cal
   v="$(sed -n 's/^OnUnitActiveSec=//p' "$TIMER_UNIT_FILE" 2>/dev/null | head -n1)"
+  if [[ -z "$v" ]]; then
+    # 新版定时器用 OnCalendar=*:0/N（每 N 分钟）。
+    cal="$(sed -n 's/^OnCalendar=//p' "$TIMER_UNIT_FILE" 2>/dev/null | head -n1)"
+    if [[ "$cal" =~ ^\*:0/([0-9]+)$ ]]; then
+      v="${BASH_REMATCH[1]}min"
+    elif [[ -n "$cal" ]]; then
+      v="$cal"
+    fi
+  fi
   printf '%s' "${v:-未知}"
 }
 
