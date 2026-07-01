@@ -434,5 +434,8 @@ A：先看定时器是否在触发：`systemctl list-timers --all | grep cf-ddns
 **Q：IP 没变化也一直收到 Telegram 推送？**
 A：已修复。现在只有 IP 真正变化或首次创建记录才推送；未变化的常规检测只写日志、不打扰。若仍在收到，多半是 Bot 服务还在跑旧代码，执行 `sudo systemctl restart cf-ddns-bot.service` 重启即可。
 
+**Q：换 IP（切换线路）在哪里操作？换 IP API 报 `400` / 请求失败怎么办？**
+A：换 IP API 已经在多处可一键触发——Telegram 面板「🔁 换 IP」按钮或 `/changeip` 命令，以及 `sudo ddns` → `7`，无需单独加按钮。若报 `curl (22) 400` 或「请求失败」：脚本会自动去掉 `format=json` 重试一次，并在日志打印真实的 HTTP 状态码与响应体；用 `/log` 或看 `/var/log/cf_ddns.log` 里的「换 IP API 请求失败（HTTP …）：…」即可看到原因。常见为链接过期/被限频/参数变化——请到 Boil 面板重新生成专属 API 链接，再 `sudo ddns` → `1` 更新 `IP_CHANGE_API_URL`。
+
 **Q：定时器面板显示「每 未知」？**
 A：面板会从定时器单元解析检测间隔。升级到使用 `OnCalendar` 的新版后，重启 Bot 服务（`sudo systemctl restart cf-ddns-bot.service`）即可恢复显示「每 N min」。
