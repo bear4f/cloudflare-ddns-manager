@@ -73,11 +73,11 @@ allowed_chat_ids() {
 }
 
 is_authorized_chat() {
-  local target="$1" id
-  while IFS= read -r id; do
-    [[ "$id" == "$target" ]] && return 0
-  done < <(allowed_chat_ids)
-  return 1
+  local target="$1" ids
+  # 一次性读全部再匹配，避免命中即提前 return 关闭管道导致 allowed_chat_ids 的
+  # printf 报 "write error: Broken pipe"（噪音日志）。
+  ids=" $(allowed_chat_ids | tr '\n' ' ') "
+  [[ "$ids" == *" $target "* ]]
 }
 
 # 主用户：拥有全部权限。额外授权用户仅能查看当前 IP 与 换IP/更新DDNS，
@@ -553,7 +553,7 @@ build_panel_header() {
   bot_state="$(systemctl is-active cf-ddns-bot.service 2>/dev/null || printf 'unknown')"
   interval="$(timer_interval)"
   api_state="未启用"
-  [[ "${IP_CHANGE_ENABLED:-false}" == "true" && -n "${IP_CHANGE_API_URL:-}" ]] && api_state="已启用"
+  [[ "${IP_CHANGE_ENABLED:-false}" == "true" && -n "${IP_CHANGE_API_TOKEN:-}${IP_CHANGE_API_URL:-}" ]] && api_state="已启用"
   zone_id="$(cf_zone_id 2>/dev/null || true)"
   records_block="$(render_records_block "$zone_id" "$record_type" "$public_ip")"
   [[ -n "$records_block" ]] || records_block="🧭 记录 | 未配置"
@@ -704,16 +704,20 @@ edit_message_view() {
 # 子页面：最近日志（整合进面板消息，带「返回主面板」按钮）。
 render_log_page() {
   local chat_id="$1" message_id="$2" message_kind="$3"
-  local lines text markup
+  local lines text markup rest
 
   if [[ -f "$LOG_FILE" ]]; then
     lines="$(tail -n 12 "$LOG_FILE" 2>/dev/null || true)"
   fi
   [[ -n "${lines:-}" ]] || lines="暂无日志。"
-  # 限制长度，避免超过图片 caption 1024 上限（取最后约 850 字节）。
-  if [[ "${#lines}" -gt 850 ]]; then
-    lines="…${lines: -850}"
-  fi
+  # 从顶部按“整行”裁剪到约 900 字节内（图片 caption ≤1024）。
+  # 关键：不能用 ${lines: -N} 按字节切——会切断中文多字节字符产生非法 UTF-8，
+  # 导致 editMessageCaption 返回 400（日志呼不出来）。整行裁剪只在 \n(ASCII) 处断，安全。
+  while [[ "${#lines}" -gt 900 ]]; do
+    rest="${lines#*$'\n'}"
+    [[ "$rest" == "$lines" ]] && break
+    lines="$rest"
+  done
 
   text="$(printf '📜 <b>最近日志</b>　🕒 %s\n<pre>%s</pre>' "$(date '+%H:%M:%S')" "$(html_escape "$lines")")"
   markup="$(jq -cn '{inline_keyboard:[[
@@ -801,7 +805,7 @@ handle_changeip_panel() {
   local message_kind="$3"
   local output wait_seconds
 
-  if [[ "${IP_CHANGE_ENABLED:-false}" != "true" || -z "${IP_CHANGE_API_URL:-}" ]]; then
+  if [[ "${IP_CHANGE_ENABLED:-false}" != "true" || ( -z "${IP_CHANGE_API_TOKEN:-}" && -z "${IP_CHANGE_API_URL:-}" ) ]]; then
     edit_panel "$chat_id" "$message_id" "$message_kind" "换 IP API 未启用，请先在服务器执行 sudo ddns 配置。"
     return 0
   fi

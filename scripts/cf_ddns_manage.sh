@@ -51,6 +51,8 @@ load_env() {
   GEO_ENABLED="true"
   PANEL_IMAGE_FILE=""
   IP_CHANGE_ENABLED="false"
+  IP_CHANGE_API_TOKEN=""
+  IP_CHANGE_API_ENDPOINT=""
   IP_CHANGE_API_URL=""
   IP_CHANGE_API_FORMAT_JSON="true"
   IP_CHANGE_WAIT_SECONDS="8"
@@ -211,11 +213,17 @@ COMMENT_EOF
 
     cat <<'COMMENT_EOF'
 # 换 IP API 配置
-# IP_CHANGE_API_URL 通常是 Boil 面板生成的 https://ippanel.boil.network/api/... 专属链接。
-# IP_CHANGE_API_FORMAT_JSON=true 时会自动给链接追加 format=json。
+# 新版（推荐）：IP_CHANGE_API_TOKEN 填 Boil 面板的 API Token，脚本会用
+#   POST https://ippanel.boil.network/api/v1/changeIP + Authorization: Bearer <token>。
+#   如需自定义端点可设 IP_CHANGE_API_ENDPOINT（留空用默认）。
+# 旧版（已被 Boil 停用，仅作兼容）：IP_CHANGE_API_URL 为旧的 GET 专属链接；
+#   IP_CHANGE_API_FORMAT_JSON=true 时会自动追加 format=json。
+# 同时配置时优先使用 IP_CHANGE_API_TOKEN。
 COMMENT_EOF
 
     printf 'IP_CHANGE_ENABLED=%q\n' "$IP_CHANGE_ENABLED"
+    printf 'IP_CHANGE_API_TOKEN=%q\n' "$IP_CHANGE_API_TOKEN"
+    printf 'IP_CHANGE_API_ENDPOINT=%q\n' "$IP_CHANGE_API_ENDPOINT"
     printf 'IP_CHANGE_API_URL=%q\n' "$IP_CHANGE_API_URL"
     printf 'IP_CHANGE_API_FORMAT_JSON=%q\n' "$IP_CHANGE_API_FORMAT_JSON"
     printf 'IP_CHANGE_WAIT_SECONDS=%q\n' "$IP_CHANGE_WAIT_SECONDS"
@@ -357,16 +365,19 @@ configure_env() {
 
   echo
   echo "=== Boil 换 IP API ==="
-  echo "如果已获得专属 API，可在这里配置；脚本会把链接作为密钥保存，不会回显。"
+  echo "新版 Boil API 用 Token：在 Boil 面板「已有API / API Token」处复制（形如 847f5da6...）。"
+  echo "脚本会用 POST /api/v1/changeIP + Authorization: Bearer <token>。Token 作为密钥保存，不回显。"
   echo
 
   prompt_bool_keep IP_CHANGE_ENABLED "是否启用换 IP API？" "${IP_CHANGE_ENABLED:-false}"
 
   if [[ "$IP_CHANGE_ENABLED" == "true" ]]; then
-    prompt_secret_keep IP_CHANGE_API_URL "请输入换 IP API 专属链接"
-    prompt_bool_keep IP_CHANGE_API_FORMAT_JSON "是否自动追加 format=json？通常建议 y" "${IP_CHANGE_API_FORMAT_JSON:-true}"
+    prompt_secret_keep IP_CHANGE_API_TOKEN "请输入 Boil API Token（新版）"
     prompt_num_keep IP_CHANGE_WAIT_SECONDS "换 IP 后等待多少秒再更新 Cloudflare DDNS" "${IP_CHANGE_WAIT_SECONDS:-8}"
+    # 端点默认 https://ippanel.boil.network/api/v1/changeIP，一般无需修改；
+    # 如 Boil 调整了地址，可编辑 cf_ddns.env 的 IP_CHANGE_API_ENDPOINT。
   else
+    IP_CHANGE_API_TOKEN=""
     IP_CHANGE_API_URL=""
     IP_CHANGE_API_FORMAT_JSON="true"
     IP_CHANGE_WAIT_SECONDS="8"
@@ -472,7 +483,7 @@ change_ip_once() {
 
   load_env
 
-  if [[ "${IP_CHANGE_ENABLED:-false}" != "true" || -z "${IP_CHANGE_API_URL:-}" ]]; then
+  if [[ "${IP_CHANGE_ENABLED:-false}" != "true" || ( -z "${IP_CHANGE_API_TOKEN:-}" && -z "${IP_CHANGE_API_URL:-}" ) ]]; then
     echo "换 IP API 未启用或配置不完整，请先选择 1 修改配置。"
     return 1
   fi

@@ -161,7 +161,9 @@ TTL='120'                             # Cloudflare 自动 TTL 可填 1
 PROXY='false'                         # DDNS 通常保持 false
 
 IP_CHANGE_ENABLED='false'
-IP_CHANGE_API_URL=''
+IP_CHANGE_API_TOKEN=''                # 新版 Boil API Token（POST /api/v1/changeIP + Bearer）
+IP_CHANGE_API_ENDPOINT=''             # 端点，留空用默认 https://ippanel.boil.network/api/v1/changeIP
+IP_CHANGE_API_URL=''                  # 旧版 GET 链接（Boil 已停用，仅兼容；同时配置时优先用 Token）
 IP_CHANGE_API_FORMAT_JSON='true'
 IP_CHANGE_WAIT_SECONDS='8'
 
@@ -216,22 +218,27 @@ tail -n 20 /var/log/cf_ddns.log          # 检测 / 更新日志
 
 ## Boil 换 IP API
 
-获得 Boil IP 面板的专属 API 后，在 `sudo ddns` 的配置项中启用换 IP API，填入专属链接：
+**新版（推荐）：API Token。** 在 Boil IP 面板「已有 API / API Token」处复制 Token（形如 `847f5da6...`），`sudo ddns` → `1` 启用换 IP API 并填入 `IP_CHANGE_API_TOKEN`。脚本会用：
 
 ```text
-https://ippanel.boil.network/api/your-private-token
+POST https://ippanel.boil.network/api/v1/changeIP
+Header: Authorization: Bearer <token>
 ```
 
-默认会自动追加 `format=json`；若链接已带查询参数，脚本会自动处理。
+端点默认即上面地址，一般无需改；如 Boil 调整了地址，可在 `cf_ddns.env` 设 `IP_CHANGE_API_ENDPOINT`。
 
-启用后流程（菜单 `7` 或 Telegram「🔁 换 IP」）：
+> **旧版 GET 专属链接（`IP_CHANGE_API_URL`）已被 Boil 停用**，请求会返回 `HTTP 400：舊版API已停用`。保留该配置仅为兼容；请改用上面的 Token。同时配置时优先用 Token。
 
-1. 请求换 IP API
+启用后流程（菜单 `7` 或 Telegram「🔁 换 IP」/`/changeip`）：
+
+1. 请求换 IP API（POST + Bearer Token）
 2. 等待 `IP_CHANGE_WAIT_SECONDS` 秒
 3. 重新获取公网 IP
 4. 更新 Cloudflare DNS 记录
 
-> API 链接等同于密钥，请勿发到公开聊天、截图或仓库。
+失败时日志会打印真实的 `HTTP 状态码 + 响应体`（`/log` 或 `/var/log/cf_ddns.log`），便于判断是 Token 失效/限频还是端点变化。
+
+> API Token 等同于密钥，请勿发到公开聊天、截图或仓库。
 
 ---
 

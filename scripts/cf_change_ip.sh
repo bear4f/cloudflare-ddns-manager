@@ -58,13 +58,19 @@ summarize_response() {
 
 CHANGE_IP_STATUS=""
 
-# 请求换 IP API：响应体写入 $2，HTTP 状态码存入 CHANGE_IP_STATUS 全局。
-# 用 -w 捕获状态码（不加 -f，以便在 4xx/5xx 时仍拿到响应体便于排错）。2xx 返回 0。
-# 注意：必须直接调用（不要放进 $(...)），否则全局赋值在子shell里丢失。
+# 默认新版 API 端点（Boil 已停用旧版 GET 链接，改为 POST + Bearer Token）。
+DEFAULT_API_ENDPOINT="https://ippanel.boil.network/api/v1/changeIP"
+
+# 发起换 IP 请求：新版传 token 走 POST + Authorization: Bearer；旧版留空 token 走 GET。
+# 响应体写入 body_file，HTTP 状态码存入 CHANGE_IP_STATUS。2xx 返回 0。
+# 必须直接调用（勿放进 $(...)），否则全局赋值会在子shell丢失。
 change_ip_request() {
-  local url="$1" body_file="$2"
-  CHANGE_IP_STATUS="$(curl -sS --retry 2 --connect-timeout 10 --max-time 90 \
-    -o "$body_file" -w '%{http_code}' "$url" 2>/dev/null)" || CHANGE_IP_STATUS="000"
+  local url="$1" body_file="$2" token="${3:-}"
+  local -a args=(-sS --retry 2 --connect-timeout 10 --max-time 90 -o "$body_file" -w '%{http_code}')
+  if [[ -n "$token" ]]; then
+    args+=(-X POST -H "Authorization: Bearer ${token}")
+  fi
+  CHANGE_IP_STATUS="$(curl "${args[@]}" "$url" 2>/dev/null)" || CHANGE_IP_STATUS="000"
   [[ "$CHANGE_IP_STATUS" == 2* ]]
 }
 
@@ -77,7 +83,12 @@ main() {
   source "$ENV_FILE"
 
   [[ "${IP_CHANGE_ENABLED:-false}" == "true" ]] || die "换 IP API 未启用，请先执行 ddns 配置。"
-  [[ -n "${IP_CHANGE_API_URL:-}" ]] || die "IP_CHANGE_API_URL 不能为空。"
+
+  local token="${IP_CHANGE_API_TOKEN:-}"
+  local endpoint="${IP_CHANGE_API_ENDPOINT:-$DEFAULT_API_ENDPOINT}"
+
+  [[ -n "$token" || -n "${IP_CHANGE_API_URL:-}" ]] \
+    || die "换 IP API 未配置：请填写 IP_CHANGE_API_TOKEN（新版 Boil API Token）或旧版 IP_CHANGE_API_URL。"
 
   exec 9>"$LOCK_FILE"
   flock -n 9 || die "已有一个换 IP 任务正在运行。"
@@ -85,21 +96,31 @@ main() {
   touch "$LOG_FILE"
   chmod 600 "$LOG_FILE" 2>/dev/null || true
 
-  local request_url body_file response summary body
-  request_url="$(api_url_with_format "$IP_CHANGE_API_URL")"
+  local body_file response summary body
   body_file="$(mktemp)"
-
   log "正在请求换 IP API。"
-  if ! change_ip_request "$request_url" "$body_file"; then
-    # 常见 400 诱因：追加的 format=json 不被该 API 接受。回退用原始链接再试一次。
-    if [[ "$request_url" != "$IP_CHANGE_API_URL" ]]; then
-      log "换 IP API 返回 HTTP ${CHANGE_IP_STATUS}，去掉 format=json 重试。"
-      change_ip_request "$IP_CHANGE_API_URL" "$body_file" || true
-    fi
-    if [[ "$CHANGE_IP_STATUS" != 2* ]]; then
+
+  if [[ -n "$token" ]]; then
+    # 新版：POST /api/v1/changeIP + Authorization: Bearer <token>
+    if ! change_ip_request "$endpoint" "$body_file" "$token"; then
       body="$(head -c 400 "$body_file" 2>/dev/null | tr -d '\r\n')"
       rm -f "$body_file"
-      die "换 IP API 请求失败（HTTP ${CHANGE_IP_STATUS}）：${body:-无响应体，请确认 API 链接是否有效/未过期}"
+      die "换 IP API 请求失败（HTTP ${CHANGE_IP_STATUS}）：${body:-无响应体，请确认 API Token 是否有效/未过期}"
+    fi
+  else
+    # 旧版：GET url（Boil 已停用，保留兼容）；失败自动去掉 format=json 再试一次。
+    local request_url
+    request_url="$(api_url_with_format "$IP_CHANGE_API_URL")"
+    if ! change_ip_request "$request_url" "$body_file"; then
+      if [[ "$request_url" != "$IP_CHANGE_API_URL" ]]; then
+        log "换 IP API 返回 HTTP ${CHANGE_IP_STATUS}，去掉 format=json 重试。"
+        change_ip_request "$IP_CHANGE_API_URL" "$body_file" || true
+      fi
+      if [[ "$CHANGE_IP_STATUS" != 2* ]]; then
+        body="$(head -c 400 "$body_file" 2>/dev/null | tr -d '\r\n')"
+        rm -f "$body_file"
+        die "换 IP API 请求失败（HTTP ${CHANGE_IP_STATUS}）：${body:-无响应体}。提示：Boil 旧版 GET API 已停用，请改用 API Token（sudo ddns → 1 重新配置）。"
+      fi
     fi
   fi
 
