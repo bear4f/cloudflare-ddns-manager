@@ -251,11 +251,23 @@ send_html_message() {
 send_json() {
   local method="$1"
   local payload="$2"
+  local resp desc
 
-  tg_api "$method" \
+  # 不用 -f：即使 4xx 也拿到响应体，好把 Telegram 的真实报错原因记进日志
+  # （如 "message caption is too long" / "can't parse entities" 等）。
+  resp="$(curl -sS --retry 2 --retry-delay 2 --retry-connrefused \
+    --connect-timeout 10 --max-time 60 \
+    "https://api.telegram.org/bot${TG_BOT_TOKEN}/${method}" \
     -H "Content-Type: application/json" \
-    --data "$payload" \
-    >/dev/null || log "Telegram ${method} 请求失败。"
+    --data "$payload" 2>/dev/null || true)"
+
+  if ! jq -e '.ok == true' >/dev/null 2>&1 <<<"$resp"; then
+    desc="$(jq -r '.description // empty' <<<"$resp" 2>/dev/null || true)"
+    [[ -n "$desc" ]] || desc="$(printf '%s' "$resp" | head -c 200)"
+    log "Telegram ${method} 请求失败：${desc:-无响应}"
+    return 1
+  fi
+  return 0
 }
 
 # ===== Cloudflare 只读查询（用于面板展示同步状态）=====
@@ -724,7 +736,9 @@ render_log_page() {
     {text:"🔄 刷新日志", callback_data:"log"},
     {text:"🏠 返回主面板", callback_data:"home"}
   ]]}')"
-  edit_message_view "$chat_id" "$message_id" "$message_kind" "$text" "$markup"
+  # 就地编辑面板；若失败（如 caption 限制），退回普通消息保证日志一定能看到。
+  edit_message_view "$chat_id" "$message_id" "$message_kind" "$text" "$markup" && return 0
+  send_html_message "$chat_id" "$text"
 }
 
 # 子页面：授权用户管理（列表 + 添加 + 逐个删除 + 返回）。
